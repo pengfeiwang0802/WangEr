@@ -15,3 +15,6 @@ xcuserdata/
 *api_key*
 *token*
 *.env
+
+# Local runtime data
+conversations.json
