@@ -32,6 +32,7 @@ class ChatViewController: NSViewController {
     // 底部状态栏
     private let statusBar = NSView()
     private let modelLabel = NSTextField()
+    private let statusLabel = NSTextField()
     private let tokenLabel = NSTextField()
     private let balanceLabel = NSTextField()
     
@@ -270,6 +271,13 @@ class ChatViewController: NSViewController {
         modelLabel.isEditable = false; modelLabel.isBordered = false; modelLabel.backgroundColor = .clear
         statusBar.addSubview(modelLabel)
         
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.stringValue = "🤖 就绪"
+        statusLabel.font = NSFont.systemFont(ofSize: 11)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.isEditable = false; statusLabel.isBordered = false; statusLabel.backgroundColor = .clear
+        statusBar.addSubview(statusLabel)
+        
         tokenLabel.translatesAutoresizingMaskIntoConstraints = false
         tokenLabel.stringValue = "⚡ 0 tok"
         tokenLabel.font = NSFont.systemFont(ofSize: 11)
@@ -291,6 +299,8 @@ class ChatViewController: NSViewController {
             statusBar.heightAnchor.constraint(equalToConstant: 24),
             modelLabel.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor, constant: 12),
             modelLabel.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
+            statusLabel.leadingAnchor.constraint(equalTo: modelLabel.trailingAnchor, constant: 12),
+            statusLabel.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
             tokenLabel.centerXAnchor.constraint(equalTo: statusBar.centerXAnchor),
             tokenLabel.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
             balanceLabel.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor, constant: -12),
@@ -396,14 +406,27 @@ extension ChatViewController: NSTextViewDelegate {
         statusBar.layer?.backgroundColor = NSColor(calibratedRed: 0.1, green: 0.45, blue: 0.9, alpha: 0.08).cgColor
         js("at()")
         
-        var req = URLRequest(url: URL(string: "\(AppConfig.gatewayURL)/v1/chat/completions")!)
+        var req = URLRequest(url: URL(string: "\(AppConfig.gatewayURL)/v1/responses")!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(AppConfig.gatewayToken)", forHTTPHeaderField: "Authorization")
+        // Build conversation history as OpenResponses format
+        let recentMessages = Array(messages.suffix(20))
+        let inputItems: [[String: Any]] = recentMessages.map { msg in
+            let role = msg["role"] ?? "user"
+            let content = msg["content"] ?? ""
+            return [
+                "type": "message",
+                "role": role,
+                "content": [["type": "input_text", "text": content]]
+            ]
+        }
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "model": "openclaw", "messages": Array(messages.suffix(20)),
-            "max_tokens": 4096, "temperature": 0.7, "stream": true
-        ])
+            "model": "openclaw",
+            "input": inputItems,
+            "max_output_tokens": 4096, "temperature": 0.7,
+            "stream": true
+        ] as [String : Any])
         let task = URLSession(configuration: .default, delegate: self, delegateQueue: nil).dataTask(with: req)
         currentStreamTask = task; task.resume()
     }
@@ -411,35 +434,102 @@ extension ChatViewController: NSTextViewDelegate {
     private func stopGenerating() {
         isGenerating = false; sendButton.isHidden = false; stopButton.isHidden = true
         statusBar.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        statusLabel.stringValue = "🤖 就绪"
     }
     
     private func js(_ code: String) { webView.evaluateJavaScript(code) }
     private func escJS(_ s: String) -> String { s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'").replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\r", with: "") }
 }
 
-// MARK: - Streaming SSE
+// MARK: - Streaming SSE (OpenResponses)
 extension ChatViewController: URLSessionDataDelegate {
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         guard let text = String(data: data, encoding: .utf8) else { return }
         var foundDone = false
-        for line in text.components(separatedBy: "\n") {
-            guard line.hasPrefix("data: ") else { continue }
-            let payload = String(line.dropFirst(6)).trimmingCharacters(in: .whitespaces)
-            if payload == "[DONE]" { foundDone = true; break }
-            guard let d = payload.data(using: .utf8),
-                  let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                  let c = j["choices"] as? [[String: Any]],
-                  let f = c.first,
-                  let delta = f["delta"] as? [String: Any],
-                  let content = delta["content"] as? String else { continue }
-            DispatchQueue.main.async {
-                self.js("apd('\(self.escJS(content))')")
-                self.streamCharCount += content.count
-                let liveTotal = self.totalPromptTokens + self.totalCompletionTokens + self.streamCharCount / 3
-                self.tokenLabel.stringValue = "⚡ \(self.formatNumber(self.totalPromptTokens)) + \(self.formatNumber(self.totalCompletionTokens + self.streamCharCount / 3)) = \(self.formatNumber(liveTotal)) tok"
+        
+        // Parse SSE lines — OpenResponses format: event: <type>\ndata: {...}\n\n
+        let lines = text.components(separatedBy: "\n")
+        var currentEvent = ""
+        
+        for line in lines {
+            if line.hasPrefix("event: ") {
+                currentEvent = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+            } else if line.hasPrefix("data: ") {
+                let currentData = String(line.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                
+                if currentData == "[DONE]" {
+                    foundDone = true
+                    break
+                }
+                
+                if !currentData.isEmpty {
+                    processResponsesEvent(event: currentEvent, data: currentData)
+                }
+                currentEvent = ""
             }
         }
+        
         if foundDone { DispatchQueue.main.async { self.finalizeAndUpdateStats() } }
+    }
+    
+    private func processResponsesEvent(event: String, data: String) {
+        guard let d = data.data(using: .utf8),
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let type = j["type"] as? String else { return }
+        
+        switch type {
+        case "response.created":
+            DispatchQueue.main.async {
+                self.statusBar.layer?.backgroundColor = NSColor(calibratedRed: 0.1, green: 0.45, blue: 0.9, alpha: 0.12).cgColor
+                self.statusLabel.stringValue = "🤖 启动..."
+            }
+            
+        case "response.in_progress":
+            DispatchQueue.main.async { self.statusLabel.stringValue = "🤖 思考中..." }
+            
+        case "response.output_item.added":
+            if let item = j["item"] as? [String: Any], item["type"] as? String == "function_call" {
+                let name = item["name"] as? String ?? ""
+                DispatchQueue.main.async { self.statusLabel.stringValue = "🔧 调用工具: \(name)" }
+            } else {
+                DispatchQueue.main.async { self.statusLabel.stringValue = "🤖 思考中..." }
+            }
+            
+        case "response.output_text.delta":
+            if let content = j["delta"] as? String {
+                DispatchQueue.main.async {
+                    self.js("apd('\(self.escJS(content))')")
+                    self.streamCharCount += content.count
+                    let liveTotal = self.totalPromptTokens + self.totalCompletionTokens + self.streamCharCount / 3
+                    self.tokenLabel.stringValue = "⚡ \(self.formatNumber(self.totalPromptTokens)) + \(self.formatNumber(self.totalCompletionTokens + self.streamCharCount / 3)) = \(self.formatNumber(liveTotal)) tok"
+                    self.statusLabel.stringValue = "📝 生成回复..."
+                }
+            }
+            
+        case "response.completed":
+            if let resp = j["response"] as? [String: Any], let usage = resp["usage"] as? [String: Any] {
+                DispatchQueue.main.async {
+                    if let inputTokens = usage["input_tokens"] as? Int {
+                        self.totalPromptTokens = inputTokens
+                    }
+                    if let outputTokens = usage["output_tokens"] as? Int {
+                        self.totalCompletionTokens = outputTokens
+                    }
+                    self.updateUsageDisplay()
+                }
+            }
+            DispatchQueue.main.async { self.statusLabel.stringValue = "🤖 就绪" }
+            
+        case "response.failed":
+            if let err = j["error"] as? [String: Any], let msg = err["message"] as? String {
+                DispatchQueue.main.async {
+                    self.js("addMessage('assistant','❌ 错误: \(self.escJS(msg))')")
+                }
+            }
+            
+        default:
+            break
+        }
     }
     
     private func finalizeAndUpdateStats() {
