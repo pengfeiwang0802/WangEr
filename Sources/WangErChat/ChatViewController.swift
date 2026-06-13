@@ -1,6 +1,20 @@
 import AppKit
 import WebKit
 
+// MARK: - 数据模型
+struct Conversation: Codable {
+    var id = UUID()
+    var title: String
+    var messages: [[String: String]] = []
+    var createdAt = Date()
+}
+
+extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
 class ChatViewController: NSViewController {
     // === UI 组件 ===
     private let splitView = NSSplitView()
@@ -40,7 +54,8 @@ class ChatViewController: NSViewController {
     private let modelMenu = NSMenu()
     
     // === 状态 ===
-    private var messages: [[String: String]] = []
+    private var conversations: [Conversation] = []
+    private var currentConversationIndex = 0
     private var isGenerating = false
     private var currentStreamTask: URLSessionDataTask?
     private var totalPromptTokens = 0
@@ -49,6 +64,13 @@ class ChatViewController: NSViewController {
     
     private var currentModel = "DeepSeek V4"
     private var balance: String = "--"
+    
+    private var currentMessages: [[String: String]] {
+        get { conversations[safe: currentConversationIndex]?.messages ?? [] }
+        set { if conversations.indices.contains(currentConversationIndex) { conversations[currentConversationIndex].messages = newValue; saveConversations() } }
+    }
+    
+    private let savePath = "\(NSHomeDirectory())/.openclaw/workspace/WangErChat/conversations.json"
     
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 860, height: 660))
@@ -62,9 +84,20 @@ class ChatViewController: NSViewController {
         setupToolbar()
         setupChatArea()
         setupModelMenu()
+        // 加载持久化的会话，没有则创建默认
+        loadConversations()
+        if conversations.isEmpty {
+            conversations = [Conversation(title: "💬 新对话 1")]
+        }
         loadChatHTML()
         updateUsageDisplay()
         fetchBalance()
+        conversationTableView.reloadData()
+        let lastIndex = min(conversations.count - 1, 0)
+        conversationTableView.selectRowIndexes(IndexSet(integer: lastIndex), byExtendingSelection: false)
+        if conversations.count > 1 || !conversations[0].messages.isEmpty {
+            switchToConversation(lastIndex)
+        }
     }
     
     // MARK: - 主布局
@@ -164,6 +197,7 @@ class ChatViewController: NSViewController {
             agentsScrollView.bottomAnchor.constraint(equalTo: sidebarView.bottomAnchor),
         ])
         conversationTableView.dataSource = self; conversationTableView.delegate = self
+        conversationTableView.doubleAction = #selector(doubleClickConversation)
         agentsTableView.dataSource = self; agentsTableView.delegate = self
     }
     
@@ -216,6 +250,11 @@ class ChatViewController: NSViewController {
         textView.drawsBackground = false
         textView.delegate = self
         textView.onCommandEnter = { [weak self] in self?.send() }
+        
+        // Focus input on launch
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.textView.window?.makeFirstResponder(self?.textView)
+        }
         textScrollView.documentView = textView
         chatContainer.addSubview(textScrollView)
         
@@ -344,7 +383,35 @@ class ChatViewController: NSViewController {
         modelMenu.items.forEach { $0.state = .off }; sender.state = .on
         currentModel = sender.title; modelButton.title = "🧠 \(currentModel) ▾"; modelLabel.stringValue = "🤖 \(currentModel)"
     }
-    @objc func newConversation() { print("新建会话（暂未实现）") }
+    private func saveConversations() {
+        guard let data = try? JSONEncoder().encode(conversations) else { return }
+        try? data.write(to: URL(fileURLWithPath: savePath))
+    }
+    
+    private func loadConversations() {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: savePath)),
+              let loaded = try? JSONDecoder().decode([Conversation].self, from: data) else { return }
+        conversations = loaded
+    }
+    
+    @objc func doubleClickConversation() {
+        let row = conversationTableView.clickedRow
+        guard row >= 0, row < conversations.count else { return }
+        let view = conversationTableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? NSTableCellView
+        guard let cell = view?.textField else { return }
+        cell.isEditable = true
+        cell.becomeFirstResponder()
+        cell.delegate = self
+    }
+    
+    @objc func newConversation() {
+        let conv = Conversation(title: "💬 新对话 \(conversations.count + 1)")
+        conversations.append(conv)
+        conversationTableView.reloadData()
+        let newIndex = conversations.count - 1
+        conversationTableView.selectRowIndexes(IndexSet(integer: newIndex), byExtendingSelection: false)
+        switchToConversation(newIndex)
+    }
     @objc func addAgent() { print("添加 Agent（暂未实现）") }
     @objc func showSettings() { print("设置（暂未实现）") }
     
@@ -388,7 +455,7 @@ extension ChatViewController: NSTextViewDelegate {
         let text = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isGenerating else { return }
         textView.string = ""
-        messages.append(["role": "user", "content": text])
+        currentMessages.append(["role": "user", "content": text])
         js("addMessage('user','\(escJS(text))')")
         sendStreamToGateway(text)
     }
@@ -411,7 +478,7 @@ extension ChatViewController: NSTextViewDelegate {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(AppConfig.gatewayToken)", forHTTPHeaderField: "Authorization")
         // Build conversation history as OpenResponses format
-        let recentMessages = Array(messages.suffix(20))
+        let recentMessages = Array(currentMessages.suffix(20))
         let inputItems: [[String: Any]] = recentMessages.map { msg in
             let role = msg["role"] ?? "user"
             let content = msg["content"] ?? ""
@@ -550,9 +617,9 @@ extension ChatViewController: URLSessionDataDelegate {
             guard let self = self else { return }
             self.js("rt()")
             if let t = r as? String, !t.isEmpty {
-                self.messages.append(["role": "assistant", "content": t])
+                self.currentMessages.append(["role": "assistant", "content": t])
                 let compTok = max(1, self.streamCharCount / 3)
-                let promptTok = max(1, (self.messages.filter { $0["role"] == "user" }.last?["content"] ?? "").count / 3)
+                let promptTok = max(1, (self.currentMessages.filter { $0["role"] == "user" }.last?["content"] ?? "").count / 3)
                 self.totalPromptTokens += promptTok
                 self.totalCompletionTokens += compTok
                 self.updateUsageDisplay()
@@ -572,11 +639,52 @@ extension ChatViewController: URLSessionDataDelegate {
             }
         }
     }
+    
+    private func switchToConversation(_ index: Int) {
+        guard conversations.indices.contains(index) else { return }
+        currentConversationIndex = index
+        totalPromptTokens = 0
+        totalCompletionTokens = 0
+        streamCharCount = 0
+        updateUsageDisplay()
+        // Re-render messages
+        let conv = conversations[index]
+        let html = chatHTML()
+        webView.loadHTMLString(html, baseURL: nil)
+        // Re-add all messages to webview after load
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            for msg in conv.messages {
+                let role = msg["role"] ?? "user"
+                let content = msg["content"] ?? ""
+                self.js("addMessage('\(self.escJS(role))','\(self.escJS(content))')")
+            }
+        }
+    }
+}
+
+// MARK: - NSTextFieldDelegate (会话重命名)
+extension ChatViewController: NSTextFieldDelegate {
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let tf = obj.object as? NSTextField else { return }
+        let row = conversationTableView.selectedRow
+        guard row >= 0, row < conversations.count else { return }
+        let newTitle = tf.stringValue.trimmingCharacters(in: .whitespaces)
+        if !newTitle.isEmpty {
+            conversations[row].title = newTitle
+            saveConversations()
+        }
+        tf.isEditable = false
+        conversationTableView.reloadData()
+    }
 }
 
 // MARK: - NSTableView
 extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
-    func numberOfRows(in tableView: NSTableView) -> Int { return 3 }
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        if tableView == conversationTableView { return conversations.count }
+        return 3
+    }
+    
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let id = NSUserInterfaceItemIdentifier("c")
         var cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView
@@ -586,12 +694,22 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
             tf.font = NSFont.systemFont(ofSize: 12); cell?.addSubview(tf); cell?.textField = tf
         }
         if tableView == conversationTableView {
-            cell?.textField?.stringValue = ["📝 Vinfast 报价单", "📊 项目进度", "💬 日常聊天"][row]
+            cell?.textField?.stringValue = conversations[safe: row]?.title ?? "会话"
         } else {
-            cell?.textField?.stringValue = ["⭐ main（你）", "🔧 translator", "📊 data-analyzer"][row]
+            let t = ["⭐ main（你）", "🔧 translator", "📊 data-analyzer"]
+            cell?.textField?.stringValue = t[safe: row] ?? ""
         }
         cell?.textField?.frame = NSRect(x: 4, y: 0, width: 200, height: 32)
         cell?.textField?.sizeToFit()
         return cell
+    }
+    
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard let tableView = notification.object as? NSTableView,
+              tableView == conversationTableView else { return }
+        let row = tableView.selectedRow
+        if row >= 0 && row < conversations.count {
+            switchToConversation(row)
+        }
     }
 }
