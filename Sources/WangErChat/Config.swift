@@ -24,5 +24,15 @@ struct AppConfig {
         return ""
     }
     
+    /// Moonshot (Kimi) API Key — 从本地文件读取
+    static var moonshotAPIKey: String {
+        let path = "\(NSHomeDirectory())/.openclaw/workspace/moonshot_api_key_backup.md"
+        if let key = try? String(contentsOfFile: path).trimmingCharacters(in: .whitespacesAndNewlines),
+           key.hasPrefix("sk-") {
+            return key
+        }
+        return ""
+    }
+    
     static let gatewayURL = "http://127.0.0.1:18789"
 }

@@ -9,6 +9,21 @@ struct Conversation: Codable {
     var createdAt = Date()
 }
 
+struct AgentInfo: Codable {
+    let id: String
+    let identityName: String?
+    let identityEmoji: String?
+    let model: String?
+    let workspace: String?
+    let isDefault: Bool?
+    
+    var displayName: String {
+        let emoji = identityEmoji ?? "🤖"
+        let name = identityName ?? id
+        return "\(emoji) \(name)"
+    }
+}
+
 extension Array {
     subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
@@ -36,6 +51,14 @@ class ChatViewController: NSViewController {
     private let agentsScrollView = NSScrollView()
     private let sidebarDivider = NSBox()
     
+    // Agent 参数面板
+    private let agentPanelView = NSView()
+    private let agentPanelLabel = NSTextField()
+    private let agentPanelName = NSTextField()
+    private let agentPanelModel = NSTextField()
+    private let agentPanelID = NSTextField()
+    private let agentPanelDivider = NSBox()
+    
     // 聊天区
     private let webView = WKWebView()
     private let textView = SendTextView()
@@ -53,17 +76,29 @@ class ChatViewController: NSViewController {
     // 模型选择
     private let modelMenu = NSMenu()
     
+    // 可用模型列表（从 openclaw.json 读取）
+    private struct ModelOption {
+        let displayName: String
+        let apiModelId: String  // 格式: providerName/modelId
+    }
+    
+    private var availableModels: [ModelOption] = []
+    
     // === 状态 ===
     private var conversations: [Conversation] = []
     private var currentConversationIndex = 0
     private var isGenerating = false
     private var currentStreamTask: URLSessionDataTask?
+    private var safetyTimer: Timer?
     private var totalPromptTokens = 0
     private var totalCompletionTokens = 0
     private var streamCharCount = 0
     
-    private var currentModel = "DeepSeek V4"
-    private var balance: String = "--"
+    private var currentModel = "DeepSeek V4 Flash"
+    private var dsBalance: String = "--"
+    private var moonshotBalance: String = "--"
+    private var agents: [AgentInfo] = []
+    private var currentAgentId = "main"
     
     private var currentMessages: [[String: String]] {
         get { conversations[safe: currentConversationIndex]?.messages ?? [] }
@@ -83,6 +118,7 @@ class ChatViewController: NSViewController {
         setupSidebar()
         setupToolbar()
         setupChatArea()
+        loadAvailableModels()
         setupModelMenu()
         // 加载持久化的会话，没有则创建默认
         loadConversations()
@@ -90,6 +126,7 @@ class ChatViewController: NSViewController {
             conversations = [Conversation(title: "💬 新对话 1")]
         }
         loadChatHTML()
+        setupAgentPanel()
         updateUsageDisplay()
         fetchBalance()
         conversationTableView.reloadData()
@@ -98,6 +135,7 @@ class ChatViewController: NSViewController {
         if conversations.count > 1 || !conversations[0].messages.isEmpty {
             switchToConversation(lastIndex)
         }
+        loadAgents()
     }
     
     // MARK: - 主布局
@@ -196,9 +234,12 @@ class ChatViewController: NSViewController {
             agentsScrollView.trailingAnchor.constraint(equalTo: sidebarView.trailingAnchor),
             agentsScrollView.bottomAnchor.constraint(equalTo: sidebarView.bottomAnchor),
         ])
+        
+        setupAgentPanel()
         conversationTableView.dataSource = self; conversationTableView.delegate = self
         conversationTableView.doubleAction = #selector(doubleClickConversation)
         agentsTableView.dataSource = self; agentsTableView.delegate = self
+        setupAgentPanel()
     }
     
     // MARK: - 顶部工具栏
@@ -270,7 +311,6 @@ class ChatViewController: NSViewController {
         chatContainer.addSubview(stopButton)
         
         NSLayoutConstraint.activate([
-            // WebView fills above input
             webView.topAnchor.constraint(equalTo: toolbarView.bottomAnchor, constant: 4),
             webView.leadingAnchor.constraint(equalTo: chatContainer.leadingAnchor, constant: 8),
             webView.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -8),
@@ -356,33 +396,218 @@ class ChatViewController: NSViewController {
         return n >= 1000 ? String(format: "%.1fK", Double(n)/1000) : "\(n)"
     }
     
+    private func loadAgents() {
+        let pipe = Pipe()
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+        task.arguments = ["-c", "/usr/local/bin/openclaw agents list --json 2>/dev/null || echo '[]'"]
+        task.standardOutput = pipe
+        
+        do {
+            try task.run()
+            task.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let list = try? JSONDecoder().decode([AgentInfo].self, from: data), !list.isEmpty {
+                DispatchQueue.main.async {
+                    self.agents = list
+                    self.agentsTableView.reloadData()
+                    if let idx = list.firstIndex(where: { $0.isDefault == true || $0.id == "main" }) {
+                        self.agentsTableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+                    }
+                }
+            } else {
+                let output = String(data: data, encoding: .utf8) ?? ""
+                print("agents list raw: \(output.prefix(100))")
+                DispatchQueue.main.async {
+                    self.agents = [AgentInfo(id: "main", identityName: "王二（你）", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
+                    self.agentsTableView.reloadData()
+                    self.agentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+                }
+            }
+        } catch {
+            print("loadAgents error: \(error)")
+            DispatchQueue.main.async {
+                self.agents = [AgentInfo(id: "main", identityName: "王二（你）", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
+                self.agentsTableView.reloadData()
+            }
+        }
+    }
+    
     private func fetchBalance() {
-        guard let url = URL(string: "https://api.deepseek.com/user/balance") else { return }
-        var req = URLRequest(url: url)
-        req.setValue("Bearer \(AppConfig.deepseekAPIKey)", forHTTPHeaderField: "Authorization")
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
-            guard let self = self, let data = data, error == nil else { return }
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let infos = json["balance_infos"] as? [[String: Any]],
-                  let first = infos.first,
-                  let bal = first["total_balance"] as? String else { return }
-            DispatchQueue.main.async { self.balance = bal; self.balanceLabel.stringValue = "💰 \(bal) 元" }
-        }.resume()
+        // 查 DeepSeek 余额
+        if let url = URL(string: "https://api.deepseek.com/user/balance") {
+            var req = URLRequest(url: url)
+            req.setValue("Bearer \(AppConfig.deepseekAPIKey)", forHTTPHeaderField: "Authorization")
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
+                guard let self = self, let data = data, error == nil else { return }
+                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let infos = json["balance_infos"] as? [[String: Any]],
+                      let first = infos.first,
+                      let bal = first["total_balance"] as? String else { return }
+                DispatchQueue.main.async { self.dsBalance = bal; self.updateBalanceDisplay() }
+            }.resume()
+        }
+        
+        // 查 Kimi 余额
+        let moonshotKey = AppConfig.moonshotAPIKey
+        guard !moonshotKey.isEmpty else { return }
+        if let url = URL(string: "https://api.moonshot.cn/v1/users/me/balance") {
+            var req = URLRequest(url: url)
+            req.setValue("Bearer \(moonshotKey)", forHTTPHeaderField: "Authorization")
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
+                guard let self = self, let data = data, error == nil else { return }
+                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      json["status"] as? Bool == true,
+                      let balData = json["data"] as? [String: Any],
+                      let bal = balData["available_balance"] as? Double else { return }
+                DispatchQueue.main.async { self.moonshotBalance = String(format: "%.2f", bal); self.updateBalanceDisplay() }
+            }.resume()
+        }
+    }
+    
+    private func updateBalanceDisplay() {
+        let ds = dsBalance
+        let ms = moonshotBalance
+        if ds != "--" && ms != "--" {
+            balanceLabel.stringValue = "💰 DS:\(ds) | Kimi:\(ms) 元"
+        } else if ds != "--" {
+            balanceLabel.stringValue = "💰 \(ds) 元"
+        } else if ms != "--" {
+            balanceLabel.stringValue = "💰 Kimi: \(ms) 元"
+        } else {
+            balanceLabel.stringValue = "💰 -- 元"
+        }
     }
     
     // MARK: - 模型选择
-    private func setupModelMenu() {
-        for name in ["DeepSeek V4", "Kimi K2.6", "GPT-4o", "Claude 4 Sonnet"] {
-            let item = NSMenuItem(title: name, action: #selector(selectModel(_:)), keyEquivalent: "")
-            item.target = self; item.state = name == currentModel ? .on : .off; modelMenu.addItem(item)
+    private func loadAvailableModels() {
+        // 从 openclaw.json 读取已配置 API key 的模型
+        let path = "\(NSHomeDirectory())/.openclaw/openclaw.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = json["models"] as? [String: Any],
+              let providers = models["providers"] as? [String: Any] else {
+            // 兜底：至少显示 DeepSeek V4 Flash
+            availableModels = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
+            return
+        }
+        
+        var result: [ModelOption] = []
+        for (providerName, providerConfig) in providers {
+            guard let config = providerConfig as? [String: Any] else { continue }
+            // 只显示配置了 API Key 的 provider 的模型
+            guard let apiKey = config["apiKey"] as? String, !apiKey.isEmpty else { continue }
+            guard let modelList = config["models"] as? [[String: Any]] else { continue }
+            for model in modelList {
+                guard let modelId = model["id"] as? String else { continue }
+                let displayName = model["name"] as? String ?? modelId
+                result.append(ModelOption(displayName: displayName, apiModelId: "\(providerName)/\(modelId)"))
+            }
+        }
+        
+        if result.isEmpty {
+            // 兜底
+            result = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
+        }
+        
+        availableModels = result
+        // 如果当前选中模型不在可用列表中，切到第一个
+        if !result.contains(where: { $0.displayName == currentModel }) {
+            currentModel = result.first?.displayName ?? "DeepSeek V4 Flash"
         }
     }
-    @objc func showModelMenu() { modelButton.menu = modelMenu; modelButton.performClick(nil) }
+    
+    private func setupModelMenu() {
+        modelMenu.removeAllItems()
+        for opt in availableModels {
+            let item = NSMenuItem(title: opt.displayName, action: #selector(selectModel(_:)), keyEquivalent: "")
+            item.target = self; item.state = opt.displayName == currentModel ? .on : .off; modelMenu.addItem(item)
+        }
+    }
+    @objc func showModelMenu() {
+        let buttonBounds = modelButton.bounds
+        let menuOrigin = NSPoint(x: buttonBounds.minX, y: buttonBounds.minY)
+        modelMenu.popUp(positioning: nil, at: menuOrigin, in: modelButton)
+    }
     @objc func selectModel(_ sender: NSMenuItem) {
         modelMenu.items.forEach { $0.state = .off }; sender.state = .on
         currentModel = sender.title; modelButton.title = "🧠 \(currentModel) ▾"; modelLabel.stringValue = "🤖 \(currentModel)"
     }
+    // MARK: - Agent 参数面板
+    private func setupAgentPanel() {
+        agentPanelView.translatesAutoresizingMaskIntoConstraints = false
+        sidebarView.addSubview(agentPanelView)
+        
+        // 分割线
+        let divider = NSBox()  // local scope
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.boxType = .separator
+        agentPanelView.addSubview(divider)
+        
+        agentPanelLabel.translatesAutoresizingMaskIntoConstraints = false
+        agentPanelLabel.stringValue = "📋 Agent 参数"
+        agentPanelLabel.font = NSFont.boldSystemFont(ofSize: 13)
+        agentPanelLabel.isEditable = false; agentPanelLabel.isBordered = false; agentPanelLabel.backgroundColor = .clear
+        agentPanelView.addSubview(agentPanelLabel)
+        
+        agentPanelName.translatesAutoresizingMaskIntoConstraints = false
+        agentPanelName.font = NSFont.systemFont(ofSize: 12)
+        agentPanelName.isEditable = false; agentPanelName.isBordered = false; agentPanelName.backgroundColor = .clear
+        agentPanelView.addSubview(agentPanelName)
+        
+        agentPanelID.translatesAutoresizingMaskIntoConstraints = false
+        agentPanelID.font = NSFont.systemFont(ofSize: 11)
+        agentPanelID.textColor = .secondaryLabelColor
+        agentPanelID.isEditable = false; agentPanelID.isBordered = false; agentPanelID.backgroundColor = .clear
+        agentPanelView.addSubview(agentPanelID)
+        
+        agentPanelModel.translatesAutoresizingMaskIntoConstraints = false
+        agentPanelModel.font = NSFont.systemFont(ofSize: 11)
+        agentPanelModel.textColor = .secondaryLabelColor
+        agentPanelModel.isEditable = false; agentPanelModel.isBordered = false; agentPanelModel.backgroundColor = .clear
+        agentPanelView.addSubview(agentPanelModel)
+        
+        NSLayoutConstraint.activate([
+            // Panel itself pinned to bottom of sidebar
+            agentPanelView.leadingAnchor.constraint(equalTo: sidebarView.leadingAnchor),
+            agentPanelView.trailingAnchor.constraint(equalTo: sidebarView.trailingAnchor),
+            agentPanelView.bottomAnchor.constraint(equalTo: sidebarView.bottomAnchor),
+            agentPanelView.heightAnchor.constraint(equalToConstant: 90),
+            
+            // Divider at top of panel
+            divider.topAnchor.constraint(equalTo: agentPanelView.topAnchor),
+            divider.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 8),
+            divider.trailingAnchor.constraint(equalTo: agentPanelView.trailingAnchor, constant: -8),
+            
+            // Label
+            agentPanelLabel.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 6),
+            agentPanelLabel.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 12),
+            
+            // Name
+            agentPanelName.topAnchor.constraint(equalTo: agentPanelLabel.bottomAnchor, constant: 4),
+            agentPanelName.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 12),
+            agentPanelName.trailingAnchor.constraint(equalTo: agentPanelView.trailingAnchor, constant: -12),
+            
+            // ID
+            agentPanelID.topAnchor.constraint(equalTo: agentPanelName.bottomAnchor, constant: 2),
+            agentPanelID.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 12),
+            agentPanelID.trailingAnchor.constraint(equalTo: agentPanelView.trailingAnchor, constant: -12),
+            
+            // Model
+            agentPanelModel.topAnchor.constraint(equalTo: agentPanelID.bottomAnchor, constant: 2),
+            agentPanelModel.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 12),
+            agentPanelModel.trailingAnchor.constraint(equalTo: agentPanelView.trailingAnchor, constant: -12),
+        ])
+    }
+    
+    private func updateAgentPanel(_ agent: AgentInfo) {
+        agentPanelName.stringValue = agent.displayName
+        agentPanelID.stringValue = "ID: \(agent.id)"
+        agentPanelModel.stringValue = "🖥 模型: \(agent.model ?? "默认")"
+    }
+    
     private func saveConversations() {
         guard let data = try? JSONEncoder().encode(conversations) else { return }
         try? data.write(to: URL(fileURLWithPath: savePath))
@@ -467,16 +692,31 @@ extension ChatViewController: NSTextViewDelegate {
         if isGenerating { js("fin()"); stopGenerating() }
     }
     
+    private func resetSafetyTimer() {
+        safetyTimer?.invalidate()
+        DispatchQueue.main.async {
+            self.safetyTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
+                guard let self = self, self.isGenerating else { return }
+                self.currentStreamTask?.cancel()
+                self.currentStreamTask = nil
+                self.js("rt()")
+                self.stopGenerating()
+            }
+        }
+    }
+    
     private func sendStreamToGateway(_ text: String) {
         isGenerating = true
         sendButton.isHidden = true; stopButton.isHidden = false
         statusBar.layer?.backgroundColor = NSColor(calibratedRed: 0.1, green: 0.45, blue: 0.9, alpha: 0.08).cgColor
         js("at()")
+        resetSafetyTimer()
         
         var req = URLRequest(url: URL(string: "\(AppConfig.gatewayURL)/v1/responses")!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(AppConfig.gatewayToken)", forHTTPHeaderField: "Authorization")
+        req.setValue(currentAgentId, forHTTPHeaderField: "x-openclaw-agent-id")
         // Build conversation history as OpenResponses format
         let recentMessages = Array(currentMessages.suffix(20))
         let inputItems: [[String: Any]] = recentMessages.map { msg in
@@ -488,10 +728,16 @@ extension ChatViewController: NSTextViewDelegate {
                 "content": [["type": "input_text", "text": content]]
             ]
         }
+        // 找到当前选中模型的 API ID
+        let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
+        print("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedModel)")
+        print("[DEBUG] availableModels: \(availableModels)")
+        req.setValue(mappedModel, forHTTPHeaderField: "x-openclaw-model")
+        let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
             "model": "openclaw",
             "input": inputItems,
-            "max_output_tokens": 4096, "temperature": 0.7,
+            "max_output_tokens": 16384, "temperature": temperature,
             "stream": true
         ] as [String : Any])
         let task = URLSession(configuration: .default, delegate: self, delegateQueue: nil).dataTask(with: req)
@@ -502,10 +748,11 @@ extension ChatViewController: NSTextViewDelegate {
         isGenerating = false; sendButton.isHidden = false; stopButton.isHidden = true
         statusBar.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         statusLabel.stringValue = "🤖 就绪"
+        safetyTimer?.invalidate()
     }
     
-    private func js(_ code: String) { webView.evaluateJavaScript(code) }
-    private func escJS(_ s: String) -> String { s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'").replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\r", with: "") }
+    fileprivate func js(_ code: String) { webView.evaluateJavaScript(code) }
+    fileprivate func escJS(_ s: String) -> String { s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'").replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\r", with: "") }
 }
 
 // MARK: - Streaming SSE (OpenResponses)
@@ -682,7 +929,7 @@ extension ChatViewController: NSTextFieldDelegate {
 extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int {
         if tableView == conversationTableView { return conversations.count }
-        return 3
+        return agents.count
     }
     
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -696,8 +943,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
         if tableView == conversationTableView {
             cell?.textField?.stringValue = conversations[safe: row]?.title ?? "会话"
         } else {
-            let t = ["⭐ main（你）", "🔧 translator", "📊 data-analyzer"]
-            cell?.textField?.stringValue = t[safe: row] ?? ""
+            cell?.textField?.stringValue = agents[safe: row]?.displayName ?? ""
         }
         cell?.textField?.frame = NSRect(x: 4, y: 0, width: 200, height: 32)
         cell?.textField?.sizeToFit()
@@ -705,11 +951,18 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
     }
     
     func tableViewSelectionDidChange(_ notification: Notification) {
-        guard let tableView = notification.object as? NSTableView,
-              tableView == conversationTableView else { return }
+        guard let tableView = notification.object as? NSTableView else { return }
         let row = tableView.selectedRow
-        if row >= 0 && row < conversations.count {
-            switchToConversation(row)
+        if tableView == conversationTableView {
+            if row >= 0 && row < conversations.count {
+                switchToConversation(row)
+            }
+        } else if tableView == agentsTableView {
+            if row >= 0 && row < agents.count {
+                currentAgentId = agents[row].id
+                updateAgentPanel(agents[row])
+                print("Switched to agent: \(currentAgentId)")
+            }
         }
     }
 }
