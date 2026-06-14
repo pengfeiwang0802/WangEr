@@ -3,7 +3,7 @@ import AppKit
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     
-    static let appVersion = "v0.2.1"
+    static let appVersion = "v0.2.2"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let viewController = ChatViewController()
