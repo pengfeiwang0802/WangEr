@@ -109,6 +109,9 @@ class ChatViewController: NSViewController {
     // SSE 累积缓冲区：防止 TCP 分片截断事件
     private var sseBuffer = ""
     
+    /// 当前活跃的工具调用链（用于显示嵌套工具调用）
+    private var activeToolStack: [String] = []
+    
     private var currentModel = "DeepSeek V4 Flash"
     private var dsBalance: String = "--"
     private var moonshotBalance: String = "--"
@@ -1184,9 +1187,6 @@ extension ChatViewController: URLSessionDataDelegate {
         }
         return ""
     }
-    
-    /// 当前活跃的工具调用链（用于显示嵌套工具调用）
-    private var activeToolStack: [String] = []
     
     private func processResponsesEvent(event: String, data: String) {
         guard !data.isEmpty else { return }
