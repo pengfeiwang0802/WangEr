@@ -80,7 +80,8 @@ class ChatViewController: NSViewController {
     // 底部状态栏
     private let statusBar = NSView()
     private let modelLabel = NSTextField()
-    private let statusLabel = NSTextField()
+    /// 状态标签
+    let statusLabel = NSTextField()
     private let tokenLabel = NSTextField()
     private let balanceLabel = NSTextField()
     
@@ -1188,6 +1189,28 @@ extension ChatViewController: URLSessionDataDelegate {
         return ""
     }
     
+    /// 线程安全的 activeToolStack 操作
+    private func pushTool(_ name: String) {
+        activeToolStack.append(name)
+    }
+    
+    private func popTool() {
+        if !activeToolStack.isEmpty {
+            activeToolStack.removeLast()
+        }
+    }
+    
+    private func resetToolStack() {
+        activeToolStack = []
+    }
+    
+    /// 安全设置状态文本
+    private func setStatus(_ text: String) {
+        // 直接赋值
+        statusLabel.stringValue = text
+        statusLabel.needsDisplay = true
+    }
+    
     private func processResponsesEvent(event: String, data: String) {
         guard !data.isEmpty else { return }
         
@@ -1206,125 +1229,118 @@ extension ChatViewController: URLSessionDataDelegate {
             return
         }
         
-        switch type {
-        case "response.created":
-            activeToolStack = []
-            DispatchQueue.main.async {
+        // 整个事件处理必须在主线程，确保数据安全
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            switch type {
+            case "response.created":
+                self.resetToolStack()
                 self.setStatusBarColor(.systemBlue, alpha: 0.08)
-                self.statusLabel.stringValue = "🤖 启动..."
-            }
-            
-        case "response.in_progress":
-            DispatchQueue.main.async {
-                self.setStatusBarColor(.systemBlue, alpha: 0.12)
-                self.statusLabel.stringValue = "🤖 思考中..."
-            }
-            
-        case "response.output_item.added":
-            if let item = j["item"] as? [String: Any], item["type"] as? String == "function_call" {
-                let name = item["name"] as? String ?? ""
-                let args = item["arguments"] as? [String: Any]
-                let friendlyName = self.friendlyToolName(name)
-                let summary = self.toolArgsSummary(args)
-                self.activeToolStack.append(name)
+                self.setStatus("🤖 启动...")
                 
-                DispatchQueue.main.async {
+            case "response.in_progress":
+                self.setStatusBarColor(.systemBlue, alpha: 0.12)
+                self.setStatus("🤖 思考中...")
+                
+            case "response.output_item.added":
+                if let item = j["item"] as? [String: Any], item["type"] as? String == "function_call" {
+                    let name = item["name"] as? String ?? ""
+                    let args = item["arguments"] as? [String: Any]
+                    let friendlyName = self.friendlyToolName(name)
+                    let summary = self.toolArgsSummary(args)
+                    self.pushTool(name)
+                    
                     self.setStatusBarColor(.systemOrange, alpha: 0.12)
                     if !summary.isEmpty {
-                        self.statusLabel.stringValue = "🔧 \(friendlyName): \(summary)"
+                        self.setStatus("🔧 \(friendlyName): \(summary)")
                     } else {
-                        self.statusLabel.stringValue = "🔧 调用工具: \(friendlyName)"
+                        self.setStatus("🔧 调用工具: \(friendlyName)")
                     }
-                }
-            } else if let item = j["item"] as? [String: Any], item["type"] as? String == "reasoning" {
-                DispatchQueue.main.async {
+                } else if let item = j["item"] as? [String: Any], item["type"] as? String == "reasoning" {
                     self.setStatusBarColor(.systemPurple, alpha: 0.10)
-                    self.statusLabel.stringValue = "🧠 深度思考..."
-                }
-            } else {
-                DispatchQueue.main.async {
+                    self.setStatus("🧠 深度思考...")
+                } else {
                     self.setStatusBarColor(.systemBlue, alpha: 0.12)
-                    self.statusLabel.stringValue = "🤖 思考中..."
+                    self.setStatus("🤖 思考中...")
                 }
-            }
-            
-        case "response.content_part.added":
-            // 内容块开始生成（比如开始输出文本前）
-            if let part = j["part"] as? [String: Any], part["type"] as? String == "text" {
-                DispatchQueue.main.async {
+                
+            case "response.content_part.added":
+                if let part = j["part"] as? [String: Any], part["type"] as? String == "text" {
                     self.setStatusBarColor(.systemGreen, alpha: 0.10)
-                    self.statusLabel.stringValue = "✍️ 准备输出..."
+                    self.setStatus("✍️ 准备输出...")
                 }
-            }
-            
-        case "response.output_text.delta":
-            if let content = j["delta"] as? String {
-                DispatchQueue.main.async {
+                
+            case "response.function_call_arguments.delta":
+                if let delta = j["delta"] as? String, !delta.isEmpty {
+                    self.setStatusBarColor(.systemOrange, alpha: 0.15)
+                    self.setStatus("🔧 参数输入中...")
+                }
+                
+            case "response.function_call_arguments.done":
+                if let name = j["name"] as? String {
+                    let friendlyName = self.friendlyToolName(name)
+                    self.setStatusBarColor(.systemOrange, alpha: 0.10)
+                    self.setStatus("✅ 参数就绪: \(friendlyName)")
+                }
+                
+            case "response.reasoning_text.delta":
+                self.setStatusBarColor(.systemPurple, alpha: 0.15)
+                self.setStatus("🧠 深度思考...")
+                
+            case "response.reasoning_summary_text.delta":
+                self.setStatusBarColor(.systemPurple, alpha: 0.12)
+                self.setStatus("🧠 推理总结中...")
+                
+            case "response.output_text.delta":
+                if let content = j["delta"] as? String {
                     self.js("apd('\(self.escJS(content))')")
                     self.streamCharCount += content.count
                     let liveTotal = self.totalPromptTokens + self.totalCompletionTokens + self.streamCharCount / 3
                     self.tokenLabel.stringValue = "⚡ \(self.formatNumber(self.totalPromptTokens)) + \(self.formatNumber(self.totalCompletionTokens + self.streamCharCount / 3)) = \(self.formatNumber(liveTotal)) tok"
-                    self.statusLabel.stringValue = "📝 生成回复..."
-                }
-            } else {
-                print("[SSE Warning] output_text.delta 缺少 delta 字段")
-            }
-            
-        case "response.output_text.done":
-            // 文本输出完成
-            DispatchQueue.main.async {
-                self.setStatusBarColor(.systemGreen, alpha: 0.08)
-                self.statusLabel.stringValue = "✅ 输出完成"
-            }
-            
-        case "response.content_part.done":
-            // 内容块完成
-            if let part = j["part"] as? [String: Any] {
-                if part["type"] as? String == "function_call" {
-                    let name = part["name"] as? String ?? ""
-                    let friendlyName = self.friendlyToolName(name)
-                    DispatchQueue.main.async {
-                        self.setStatusBarColor(.systemOrange, alpha: 0.08)
-                        self.statusLabel.stringValue = "✅ 工具完成: \(friendlyName)"
-                    }
+                    self.setStatus("📝 生成回复...")
                 } else {
-                    DispatchQueue.main.async {
+                    print("[SSE Warning] output_text.delta 缺少 delta 字段")
+                }
+                
+            case "response.output_text.done":
+                self.setStatusBarColor(.systemGreen, alpha: 0.08)
+                self.setStatus("✅ 输出完成")
+                
+            case "response.content_part.done":
+                if let part = j["part"] as? [String: Any] {
+                    if part["type"] as? String == "function_call" {
+                        let name = part["name"] as? String ?? ""
+                        let friendlyName = self.friendlyToolName(name)
+                        self.setStatusBarColor(.systemOrange, alpha: 0.08)
+                        self.setStatus("✅ 工具完成: \(friendlyName)")
+                    } else {
                         self.setStatusBarColor(.systemGreen, alpha: 0.06)
-                        self.statusLabel.stringValue = "✅ 内容块完成"
+                        self.setStatus("✅ 内容块完成")
                     }
                 }
-            }
-            
-        case "response.output_item.done":
-            // 输出项完成
-            if let item = j["item"] as? [String: Any] {
-                if item["type"] as? String == "function_call" {
-                    let name = item["name"] as? String ?? ""
-                    let friendlyName = self.friendlyToolName(name)
-                    // 从工具栈中移除
-                    if !self.activeToolStack.isEmpty {
-                        self.activeToolStack.removeLast()
-                    }
-                    let remaining = self.activeToolStack.count
-                    DispatchQueue.main.async {
+                
+            case "response.output_item.done":
+                if let item = j["item"] as? [String: Any] {
+                    if item["type"] as? String == "function_call" {
+                        let name = item["name"] as? String ?? ""
+                        let friendlyName = self.friendlyToolName(name)
+                        self.popTool()
+                        let remaining = self.activeToolStack.count
                         if remaining > 0 {
-                            self.statusLabel.stringValue = "🔧 等待工具返回: \(friendlyName)"
+                            self.setStatus("🔧 等待工具返回: \(friendlyName)")
                         } else {
                             self.setStatusBarColor(.systemBlue, alpha: 0.08)
-                            self.statusLabel.stringValue = "🔧 工具已调用: \(friendlyName)"
+                            self.setStatus("🔧 工具已调用: \(friendlyName)")
                         }
-                    }
-                } else if item["type"] as? String == "reasoning" {
-                    DispatchQueue.main.async {
+                    } else if item["type"] as? String == "reasoning" {
                         self.setStatusBarColor(.systemBlue, alpha: 0.10)
-                        self.statusLabel.stringValue = "🤖 思考完成，准备回复..."
+                        self.setStatus("🤖 思考完成，准备回复...")
                     }
                 }
-            }
-            
-        case "response.completed":
-            if let resp = j["response"] as? [String: Any], let usage = resp["usage"] as? [String: Any] {
-                DispatchQueue.main.async {
+                
+            case "response.completed":
+                if let resp = j["response"] as? [String: Any], let usage = resp["usage"] as? [String: Any] {
                     if let inputTokens = usage["input_tokens"] as? Int {
                         self.totalPromptTokens = inputTokens
                     }
@@ -1333,31 +1349,22 @@ extension ChatViewController: URLSessionDataDelegate {
                     }
                     self.updateUsageDisplay()
                 }
-            }
-            DispatchQueue.main.async {
                 self.resetStatusBarColor()
-                self.statusLabel.stringValue = "🤖 就绪"
-            }
-            // 收到 completed 事件，需要 finalize 来结束流式状态
-            // 延迟一小段时间确保 JS DOM 已渲染完
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.finalizeAndUpdateStats() }
-            
-        case "response.failed":
-            if let err = j["error"] as? [String: Any], let msg = err["message"] as? String {
-                DispatchQueue.main.async {
+                self.setStatus("🤖 就绪")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.finalizeAndUpdateStats() }
+                
+            case "response.failed":
+                if let err = j["error"] as? [String: Any], let msg = err["message"] as? String {
                     self.js("addMessage('assistant','❌ 错误: \(self.escJS(msg))')")
                 }
-            }
-            DispatchQueue.main.async {
                 self.resetStatusBarColor()
-                self.statusLabel.stringValue = "❌ 请求失败"
+                self.setStatus("❌ 请求失败")
+                DispatchQueue.main.async { self.finalizeAndUpdateStats() }
+                
+            default:
+                print("[SSE] 未处理事件类型: \(type)")
+                break
             }
-            // 失败也需要结束
-            DispatchQueue.main.async { self.finalizeAndUpdateStats() }
-            
-        default:
-            print("[SSE] 未处理事件类型: \(type)")
-            break
         }
     }
     
