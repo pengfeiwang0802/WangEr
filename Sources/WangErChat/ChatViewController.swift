@@ -88,11 +88,15 @@ class ChatViewController: NSViewController {
     private var conversations: [Conversation] = []
     private var currentConversationIndex = 0
     private var isGenerating = false
+    private var isFinalizing = false // 幂等锁：防止 finalize 被多次调用
     private var currentStreamTask: URLSessionDataTask?
     private var safetyTimer: Timer?
     private var totalPromptTokens = 0
     private var totalCompletionTokens = 0
     private var streamCharCount = 0
+    
+    // SSE 累积缓冲区：防止 TCP 分片截断事件
+    private var sseBuffer = ""
     
     private var currentModel = "DeepSeek V4 Flash"
     private var dsBalance: String = "--"
@@ -179,7 +183,8 @@ class ChatViewController: NSViewController {
         conversationTableView.rowHeight = 32; conversationTableView.backgroundColor = .clear
         conversationTableView.selectionHighlightStyle = .sourceList
         conversationScrollView.documentView = conversationTableView
-        conversationScrollView.hasVerticalScroller = false
+        conversationScrollView.hasVerticalScroller = true
+        conversationScrollView.autohidesScrollers = true
         conversationScrollView.translatesAutoresizingMaskIntoConstraints = false
         sidebarView.addSubview(conversationScrollView)
         
@@ -206,6 +211,7 @@ class ChatViewController: NSViewController {
         agentsTableView.selectionHighlightStyle = .sourceList
         agentsScrollView.documentView = agentsTableView
         agentsScrollView.hasVerticalScroller = true
+        agentsScrollView.autohidesScrollers = true
         agentsScrollView.translatesAutoresizingMaskIntoConstraints = false
         sidebarView.addSubview(agentsScrollView)
         
@@ -235,7 +241,6 @@ class ChatViewController: NSViewController {
             agentsScrollView.bottomAnchor.constraint(equalTo: sidebarView.bottomAnchor),
         ])
         
-        setupAgentPanel()
         conversationTableView.dataSource = self; conversationTableView.delegate = self
         conversationTableView.doubleAction = #selector(doubleClickConversation)
         agentsTableView.dataSource = self; agentsTableView.delegate = self
@@ -398,14 +403,25 @@ class ChatViewController: NSViewController {
     
     private func loadAgents() {
         let pipe = Pipe()
+        let errorPipe = Pipe()
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
         task.arguments = ["-c", "/usr/local/bin/openclaw agents list --json 2>/dev/null || echo '[]'"]
         task.standardOutput = pipe
+        task.standardError = errorPipe
         
         do {
             try task.run()
             task.waitUntilExit()
+            
+            // 检查命令执行是否成功
+            if task.terminationStatus != 0 {
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                let errorOutput = String(data: errorData, encoding: .utf8) ?? "未知错误"
+                print("[loadAgents] 命令失败 (exit \(task.terminationStatus)): \(errorOutput)")
+                throw NSError(domain: "WangErChat", code: Int(task.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorOutput])
+            }
+            
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             if let list = try? JSONDecoder().decode([AgentInfo].self, from: data), !list.isEmpty {
                 DispatchQueue.main.async {
@@ -417,7 +433,7 @@ class ChatViewController: NSViewController {
                 }
             } else {
                 let output = String(data: data, encoding: .utf8) ?? ""
-                print("agents list raw: \(output.prefix(100))")
+                print("[loadAgents] 解析失败或空列表，原始输出: \(output.prefix(200))")
                 DispatchQueue.main.async {
                     self.agents = [AgentInfo(id: "main", identityName: "王二（你）", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
                     self.agentsTableView.reloadData()
@@ -425,27 +441,80 @@ class ChatViewController: NSViewController {
                 }
             }
         } catch {
-            print("loadAgents error: \(error)")
-            DispatchQueue.main.async {
-                self.agents = [AgentInfo(id: "main", identityName: "王二（你）", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
-                self.agentsTableView.reloadData()
+            print("[loadAgents] 错误: \(error)")
+            DispatchQueue.main.async { [weak self] in
+                self?.agents = [AgentInfo(id: "main", identityName: "王二（你）", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
+                self?.agentsTableView.reloadData()
+                self?.agentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+                self?.statusLabel.stringValue = "⚠️ Agents 加载失败"
             }
         }
     }
     
     private func fetchBalance() {
         // 查 DeepSeek 余额
-        if let url = URL(string: "https://api.deepseek.com/user/balance") {
+        let dsKey = AppConfig.deepseekAPIKey
+        if !dsKey.isEmpty, let url = URL(string: "https://api.deepseek.com/user/balance") {
             var req = URLRequest(url: url)
-            req.setValue("Bearer \(AppConfig.deepseekAPIKey)", forHTTPHeaderField: "Authorization")
+            req.setValue("Bearer \(dsKey)", forHTTPHeaderField: "Authorization")
             req.setValue("application/json", forHTTPHeaderField: "Accept")
-            URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
-                guard let self = self, let data = data, error == nil else { return }
-                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let infos = json["balance_infos"] as? [[String: Any]],
-                      let first = infos.first,
-                      let bal = first["total_balance"] as? String else { return }
-                DispatchQueue.main.async { self.dsBalance = bal; self.updateBalanceDisplay() }
+            req.timeoutInterval = 10 // 10秒超时
+            URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
+                guard let self = self else { return }
+                if let error = error {
+                    print("[Balance] DeepSeek 查询错误: \(error)")
+                    DispatchQueue.main.async {
+                        self.dsBalance = "错误"
+                        self.updateBalanceDisplay()
+                    }
+                    return
+                }
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    print("[Balance] DeepSeek 无 HTTP 响应")
+                    DispatchQueue.main.async {
+                        self.dsBalance = "无响应"
+                        self.updateBalanceDisplay()
+                    }
+                    return
+                }
+                guard httpResponse.statusCode == 200 else {
+                    print("[Balance] DeepSeek HTTP \(httpResponse.statusCode)")
+                    DispatchQueue.main.async {
+                        self.dsBalance = "HTTP\(httpResponse.statusCode)"
+                        self.updateBalanceDisplay()
+                    }
+                    return
+                }
+                guard let data = data else {
+                    DispatchQueue.main.async {
+                        self.dsBalance = "无数据"
+                        self.updateBalanceDisplay()
+                    }
+                    return
+                }
+                do {
+                    let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    if let infos = json?["balance_infos"] as? [[String: Any]],
+                       let first = infos.first,
+                       let bal = first["total_balance"] as? String {
+                        DispatchQueue.main.async {
+                            self.dsBalance = bal
+                            self.updateBalanceDisplay()
+                        }
+                    } else {
+                        print("[Balance] DeepSeek 响应结构异常: \(String(data: data, encoding: .utf8)?.prefix(200) ?? "N/A")")
+                        DispatchQueue.main.async {
+                            self.dsBalance = "解析失败"
+                            self.updateBalanceDisplay()
+                        }
+                    }
+                } catch {
+                    print("[Balance] DeepSeek JSON 解析错误: \(error)")
+                    DispatchQueue.main.async {
+                        self.dsBalance = "解析错误"
+                        self.updateBalanceDisplay()
+                    }
+                }
             }.resume()
         }
         
@@ -456,13 +525,56 @@ class ChatViewController: NSViewController {
             var req = URLRequest(url: url)
             req.setValue("Bearer \(moonshotKey)", forHTTPHeaderField: "Authorization")
             req.setValue("application/json", forHTTPHeaderField: "Accept")
-            URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
-                guard let self = self, let data = data, error == nil else { return }
-                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      json["status"] as? Bool == true,
-                      let balData = json["data"] as? [String: Any],
-                      let bal = balData["available_balance"] as? Double else { return }
-                DispatchQueue.main.async { self.moonshotBalance = String(format: "%.2f", bal); self.updateBalanceDisplay() }
+            req.timeoutInterval = 10
+            URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
+                guard let self = self else { return }
+                if let error = error {
+                    print("[Balance] Kimi 查询错误: \(error)")
+                    DispatchQueue.main.async {
+                        self.moonshotBalance = "错误"
+                        self.updateBalanceDisplay()
+                    }
+                    return
+                }
+                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    print("[Balance] Kimi HTTP \(code)")
+                    DispatchQueue.main.async {
+                        self.moonshotBalance = "HTTP\(code)"
+                        self.updateBalanceDisplay()
+                    }
+                    return
+                }
+                guard let data = data else {
+                    DispatchQueue.main.async {
+                        self.moonshotBalance = "无数据"
+                        self.updateBalanceDisplay()
+                    }
+                    return
+                }
+                do {
+                    let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    if json?["status"] as? Bool == true,
+                       let balData = json?["data"] as? [String: Any],
+                       let bal = balData["available_balance"] as? Double {
+                        DispatchQueue.main.async {
+                            self.moonshotBalance = String(format: "%.2f", bal)
+                            self.updateBalanceDisplay()
+                        }
+                    } else {
+                        print("[Balance] Kimi 响应结构异常")
+                        DispatchQueue.main.async {
+                            self.moonshotBalance = "解析失败"
+                            self.updateBalanceDisplay()
+                        }
+                    }
+                } catch {
+                    print("[Balance] Kimi JSON 解析错误: \(error)")
+                    DispatchQueue.main.async {
+                        self.moonshotBalance = "解析错误"
+                        self.updateBalanceDisplay()
+                    }
+                }
             }.resume()
         }
     }
@@ -485,37 +597,53 @@ class ChatViewController: NSViewController {
     private func loadAvailableModels() {
         // 从 openclaw.json 读取已配置 API key 的模型
         let path = "\(NSHomeDirectory())/.openclaw/openclaw.json"
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let models = json["models"] as? [String: Any],
-              let providers = models["providers"] as? [String: Any] else {
-            // 兜底：至少显示 DeepSeek V4 Flash
+        let url = URL(fileURLWithPath: path)
+        
+        guard FileManager.default.fileExists(atPath: path) else {
+            print("[loadAvailableModels] openclaw.json 不存在，使用默认模型")
             availableModels = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
             return
         }
         
-        var result: [ModelOption] = []
-        for (providerName, providerConfig) in providers {
-            guard let config = providerConfig as? [String: Any] else { continue }
-            // 只显示配置了 API Key 的 provider 的模型
-            guard let apiKey = config["apiKey"] as? String, !apiKey.isEmpty else { continue }
-            guard let modelList = config["models"] as? [[String: Any]] else { continue }
-            for model in modelList {
-                guard let modelId = model["id"] as? String else { continue }
-                let displayName = model["name"] as? String ?? modelId
-                result.append(ModelOption(displayName: displayName, apiModelId: "\(providerName)/\(modelId)"))
+        do {
+            let data = try Data(contentsOf: url)
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let models = json["models"] as? [String: Any],
+                  let providers = models["providers"] as? [String: Any] else {
+                print("[loadAvailableModels] 解析 openclaw.json 结构失败")
+                availableModels = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
+                return
             }
-        }
-        
-        if result.isEmpty {
-            // 兜底
-            result = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
-        }
-        
-        availableModels = result
-        // 如果当前选中模型不在可用列表中，切到第一个
-        if !result.contains(where: { $0.displayName == currentModel }) {
-            currentModel = result.first?.displayName ?? "DeepSeek V4 Flash"
+            
+            var result: [ModelOption] = []
+            for (providerName, providerConfig) in providers {
+                guard let config = providerConfig as? [String: Any] else { continue }
+                // 只显示配置了 API Key 的 provider 的模型
+                guard let apiKey = config["apiKey"] as? String, !apiKey.isEmpty else { continue }
+                guard let modelList = config["models"] as? [[String: Any]] else { continue }
+                for model in modelList {
+                    guard let modelId = model["id"] as? String else { continue }
+                    let displayName = model["name"] as? String ?? modelId
+                    result.append(ModelOption(displayName: displayName, apiModelId: "\(providerName)/\(modelId)"))
+                }
+            }
+            
+            if result.isEmpty {
+                // 兜底
+                result = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
+            }
+            
+            availableModels = result
+            // 如果当前选中模型不在可用列表中，切到第一个
+            if !result.contains(where: { $0.displayName == currentModel }) {
+                currentModel = result.first?.displayName ?? "DeepSeek V4 Flash"
+            }
+        } catch {
+            print("[loadAvailableModels] 读取 openclaw.json 失败: \(error)")
+            availableModels = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
+            DispatchQueue.main.async { [weak self] in
+                self?.statusLabel.stringValue = "⚠️ 模型配置读取失败"
+            }
         }
     }
     
@@ -609,14 +737,41 @@ class ChatViewController: NSViewController {
     }
     
     private func saveConversations() {
-        guard let data = try? JSONEncoder().encode(conversations) else { return }
-        try? data.write(to: URL(fileURLWithPath: savePath))
+        do {
+            let data = try JSONEncoder().encode(conversations)
+            let url = URL(fileURLWithPath: savePath)
+            // 确保目录存在
+            let dir = url.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try data.write(to: url)
+        } catch {
+            print("[Error] saveConversations failed: \(error)")
+            DispatchQueue.main.async { [weak self] in
+                self?.statusLabel.stringValue = "⚠️ 保存失败"
+            }
+        }
     }
     
     private func loadConversations() {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: savePath)),
-              let loaded = try? JSONDecoder().decode([Conversation].self, from: data) else { return }
-        conversations = loaded
+        let url = URL(fileURLWithPath: savePath)
+        guard FileManager.default.fileExists(atPath: savePath) else {
+            print("[loadConversations] 会话文件不存在，将创建新文件: \(savePath)")
+            return
+        }
+        do {
+            let data = try Data(contentsOf: url)
+            let loaded = try JSONDecoder().decode([Conversation].self, from: data)
+            conversations = loaded
+            print("[loadConversations] 已加载 \(conversations.count) 个会话")
+        } catch let error as DecodingError {
+            print("[loadConversations] 解析会话文件失败: \(error)")
+            // 备份损坏的文件
+            let backupPath = savePath + ".backup.\(Int(Date().timeIntervalSince1970))"
+            try? FileManager.default.copyItem(atPath: savePath, toPath: backupPath)
+            print("[loadConversations] 已备份损坏文件到: \(backupPath)")
+        } catch {
+            print("[loadConversations] 读取会话文件失败: \(error)")
+        }
     }
     
     @objc func doubleClickConversation() {
@@ -636,9 +791,24 @@ class ChatViewController: NSViewController {
         let newIndex = conversations.count - 1
         conversationTableView.selectRowIndexes(IndexSet(integer: newIndex), byExtendingSelection: false)
         switchToConversation(newIndex)
+        saveConversations()
     }
-    @objc func addAgent() { print("添加 Agent（暂未实现）") }
-    @objc func showSettings() { print("设置（暂未实现）") }
+    @objc func addAgent() {
+        let alert = NSAlert()
+        alert.messageText = "添加 Agent"
+        alert.informativeText = "此功能尚未实现，敬请期待。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "确定")
+        alert.runModal()
+    }
+    @objc func showSettings() {
+        let alert = NSAlert()
+        alert.messageText = "设置"
+        alert.informativeText = "设置页面尚未实现，敬请期待。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "确定")
+        alert.runModal()
+    }
     
     // MARK: - Chat HTML
     private func loadChatHTML() { webView.loadHTMLString(chatHTML(), baseURL: nil) }
@@ -647,9 +817,9 @@ class ChatViewController: NSViewController {
         <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,"SF Pro","PingFang SC",sans-serif;font-size:14px;line-height:1.6;padding:16px;color:#1d1d1f}@media(prefers-color-scheme:dark){body{color:#f5f5f7}}.message{margin-bottom:16px;padding:10px 14px;border-radius:12px;max-width:85%;word-wrap:break-word;white-space:pre-wrap}.user{background:#007aff;color:white;margin-left:auto;border-bottom-right-radius:4px}.assistant{background:#e9e9eb;margin-right:auto;border-bottom-left-radius:4px}@media(prefers-color-scheme:dark){.assistant{background:#2c2c2e}}.message code{font-family:"SF Mono",Menlo,monospace;font-size:13px}.typing{opacity:.5;animation:blink 1s ease-in-out infinite}@keyframes blink{50%{opacity:.2}}.time{font-size:11px;opacity:.5;margin-top:4px}#messages{padding-bottom:8px}.welcome{text-align:center;margin-top:40%;opacity:.4}.welcome h2{font-size:24px;margin-bottom:8px}.welcome p{font-size:14px}</style></head><body>
         <div id="messages"><div class="welcome"><h2>👋 你好，王鹏飞</h2><p>发送消息开始对话</p></div></div>
         <script>
-        function addMessage(r,c){removeWelcome();var m=document.getElementById('messages'),d=document.createElement('div');d.className='message '+r;d.innerHTML='<p>'+esc(c)+'</p>';var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);d.scrollIntoView({behavior:'smooth'});return d}
-        function apd(t){removeWelcome();var m=document.getElementById('messages'),l=document.getElementById('s');if(!l){var d=document.createElement('div');d.className='message assistant';d.id='s';d.innerHTML='<p></p>';d.appendChild(document.createElement('div')).className='time';m.appendChild(d);l=d}l.querySelector('p').textContent+=t;l.scrollIntoView({behavior:'smooth'})}
-        function fin(){var e=document.getElementById('s');if(e){e.querySelector('.time').textContent=new Date().toLocaleTimeString();e.id=''}rt()}
+        function addMessage(r,c){try{removeWelcome();var m=document.getElementById('messages');if(!m)return null;var d=document.createElement('div');d.className='message '+r;d.innerHTML='<p>'+esc(c)+'</p>';var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);d.scrollIntoView({behavior:'smooth'});return d}catch(e){console.error('addMessage:',e);return null}}
+        function apd(t){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var l=document.getElementById('s');if(!l){var d=document.createElement('div');d.className='message assistant';d.id='s';d.innerHTML='<p></p>';d.appendChild(document.createElement('div')).className='time';m.appendChild(d);l=d}var p=l.querySelector('p');if(p)p.textContent+=t;l.scrollIntoView({behavior:'smooth'})}catch(e){console.error('apd:',e)}}
+        function fin(){try{var e=document.getElementById('s');if(e){var t=e.querySelector('.time');if(t)t.textContent=new Date().toLocaleTimeString();e.id=''}}catch(ex){console.error('fin:',ex)}rt()}
         function esc(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
         function removeWelcome(){var e=document.querySelector('.welcome');if(e)e.remove()}
         function at(){var m=document.getElementById('messages'),d=document.createElement('div');d.className='message assistant typing';d.id='t';d.innerHTML='<p>🤔 思考中...</p>';m.appendChild(d);d.scrollIntoView({behavior:'smooth'})}
@@ -689,28 +859,52 @@ extension ChatViewController: NSTextViewDelegate {
     
     @objc func stopGeneration() {
         currentStreamTask?.cancel(); currentStreamTask = nil
-        if isGenerating { js("fin()"); stopGenerating() }
+        if isGenerating && !isFinalizing {
+            js("fin()")
+            finalizeAndUpdateStats()
+        }
     }
     
     private func resetSafetyTimer() {
         safetyTimer?.invalidate()
         DispatchQueue.main.async {
-            self.safetyTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
+            self.safetyTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: false) { [weak self] _ in
                 guard let self = self, self.isGenerating else { return }
                 self.currentStreamTask?.cancel()
                 self.currentStreamTask = nil
                 self.js("rt()")
+                self.js("addMessage('assistant','⚠️ 生成超时（5分钟），已自动中断')")
                 self.stopGenerating()
             }
         }
     }
     
     private func sendStreamToGateway(_ text: String) {
+        // 前置校验
+        guard !text.isEmpty else {
+            statusLabel.stringValue = "⚠️ 消息不能为空"
+            return
+        }
+        
+        guard !AppConfig.gatewayToken.isEmpty else {
+            js("addMessage('assistant','❌ Gateway Token 未配置，请检查 openclaw.json')")
+            statusLabel.stringValue = "⚠️ Token 未配置"
+            return
+        }
+        
+        guard URL(string: "\(AppConfig.gatewayURL)/v1/responses") != nil else {
+            js("addMessage('assistant','❌ Gateway 地址无效')")
+            statusLabel.stringValue = "⚠️ 地址无效"
+            return
+        }
+        
         isGenerating = true
+        isFinalizing = false
         sendButton.isHidden = true; stopButton.isHidden = false
         statusBar.layer?.backgroundColor = NSColor(calibratedRed: 0.1, green: 0.45, blue: 0.9, alpha: 0.08).cgColor
         js("at()")
         resetSafetyTimer()
+        sseBuffer = ""
         
         var req = URLRequest(url: URL(string: "\(AppConfig.gatewayURL)/v1/responses")!)
         req.httpMethod = "POST"
@@ -734,62 +928,144 @@ extension ChatViewController: NSTextViewDelegate {
         print("[DEBUG] availableModels: \(availableModels)")
         req.setValue(mappedModel, forHTTPHeaderField: "x-openclaw-model")
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
-        req.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "model": "openclaw",
-            "input": inputItems,
-            "max_output_tokens": 16384, "temperature": temperature,
-            "stream": true
-        ] as [String : Any])
-        let task = URLSession(configuration: .default, delegate: self, delegateQueue: nil).dataTask(with: req)
+        do {
+            req.httpBody = try JSONSerialization.data(withJSONObject: [
+                "model": "openclaw",
+                "input": inputItems,
+                "max_output_tokens": 16384, "temperature": temperature,
+                "stream": true
+            ] as [String : Any])
+        } catch {
+            DispatchQueue.main.async {
+                self.js("addMessage('assistant','❌ 请求构造失败: \(self.escJS(error.localizedDescription))')")
+                self.stopGenerating()
+            }
+            return
+        }
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 310  // 比 safety timer 稍长
+        config.timeoutIntervalForResource = 600 // 10分钟总超时
+        let task = URLSession(configuration: config, delegate: self, delegateQueue: nil).dataTask(with: req)
         currentStreamTask = task; task.resume()
     }
     
     private func stopGenerating() {
-        isGenerating = false; sendButton.isHidden = false; stopButton.isHidden = true
+        isGenerating = false; isFinalizing = false; sendButton.isHidden = false; stopButton.isHidden = true
         statusBar.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         statusLabel.stringValue = "🤖 就绪"
         safetyTimer?.invalidate()
     }
     
-    fileprivate func js(_ code: String) { webView.evaluateJavaScript(code) }
-    fileprivate func escJS(_ s: String) -> String { s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'").replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\r", with: "") }
+    fileprivate func js(_ code: String) {
+        webView.evaluateJavaScript(code) { _, error in
+            if let error = error {
+                let nsError = error as NSError
+                // WKErrorJavaScriptResultTypeIsUnsupported (code 5) is harmless:
+                // it means the JS expression returned a DOM element or other
+                // type that WKWebView can't serialize. Our calls don't depend
+                // on return values, so we can safely skip it.
+                if nsError.domain == "WKErrorDomain" && nsError.code == 5 {
+                    return
+                }
+                print("[JS Error] \(nsError.domain) \(nsError.code): \(nsError.localizedDescription)")
+                if let line = nsError.userInfo["WKJavaScriptExceptionLineNumber"] as? Int {
+                    print("[JS Error]  Line: \(line)")
+                }
+                if let col = nsError.userInfo["WKJavaScriptExceptionColumnNumber"] as? Int {
+                    print("[JS Error]  Col: \(col)")
+                }
+            }
+        }
+    }
+    fileprivate func escJS(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+         .replacingOccurrences(of: "'", with: "\\'")
+         .replacingOccurrences(of: "\"", with: "\\\"")
+         .replacingOccurrences(of: "\n", with: "\\n")
+         .replacingOccurrences(of: "\r", with: "\\r")
+         .replacingOccurrences(of: "\t", with: "\\t")
+    }
 }
 
 // MARK: - Streaming SSE (OpenResponses)
 extension ChatViewController: URLSessionDataDelegate {
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        guard let text = String(data: data, encoding: .utf8) else { return }
+        guard !data.isEmpty else { return }
+        guard let chunk = String(data: data, encoding: .utf8) else {
+            print("[SSE Error] 无法将数据解码为 UTF-8")
+            DispatchQueue.main.async {
+                self.js("addMessage('assistant','❌ 接收数据解码失败')")
+                self.finalizeAndUpdateStats()
+            }
+            return
+        }
+        
+        // 追加到累积缓冲区
+        sseBuffer += chunk
+        
+        // 按 \n\n 分割完整事件块
+        let blocks = sseBuffer.components(separatedBy: "\n\n")
+        // 最后一段可能是不完整的，留在缓冲区等待下一批
+        if sseBuffer.hasSuffix("\n\n") {
+            sseBuffer = ""
+        } else {
+            sseBuffer = blocks.last ?? ""
+        }
+        
+        // 处理完整的块（排除最后一个不完整的）
+        let completeBlocks = blocks.dropLast(blocks.count > 1 && !sseBuffer.isEmpty ? 1 : 0)
+        
         var foundDone = false
         
-        // Parse SSE lines — OpenResponses format: event: <type>\ndata: {...}\n\n
-        let lines = text.components(separatedBy: "\n")
-        var currentEvent = ""
-        
-        for line in lines {
-            if line.hasPrefix("event: ") {
-                currentEvent = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
-            } else if line.hasPrefix("data: ") {
-                let currentData = String(line.dropFirst(6)).trimmingCharacters(in: .whitespaces)
-                
-                if currentData == "[DONE]" {
-                    foundDone = true
-                    break
+        for block in completeBlocks {
+            let trimmed = block.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            
+            let lines = trimmed.components(separatedBy: "\n")
+            var currentEvent = ""
+            var currentData = ""
+            
+            for line in lines {
+                if line.hasPrefix("event: ") {
+                    currentEvent = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+                } else if line.hasPrefix("data: ") {
+                    currentData = String(line.dropFirst(6)).trimmingCharacters(in: .whitespaces)
                 }
-                
-                if !currentData.isEmpty {
-                    processResponsesEvent(event: currentEvent, data: currentData)
-                }
-                currentEvent = ""
+            }
+            
+            if currentData == "[DONE]" {
+                foundDone = true
+                break
+            }
+            
+            if !currentData.isEmpty {
+                processResponsesEvent(event: currentEvent, data: currentData)
             }
         }
         
-        if foundDone { DispatchQueue.main.async { self.finalizeAndUpdateStats() } }
+        if foundDone {
+            DispatchQueue.main.async { self.finalizeAndUpdateStats() }
+            return
+        }
     }
     
     private func processResponsesEvent(event: String, data: String) {
-        guard let d = data.data(using: .utf8),
-              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-              let type = j["type"] as? String else { return }
+        guard !data.isEmpty else { return }
+        
+        guard let d = data.data(using: .utf8) else {
+            print("[SSE Error] 无法将 event data 转为 Data")
+            return
+        }
+        
+        guard let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
+            print("[SSE Error] JSON 解析失败: \(data.prefix(200))")
+            return
+        }
+        
+        guard let type = j["type"] as? String else {
+            print("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200))")
+            return
+        }
         
         switch type {
         case "response.created":
@@ -818,6 +1094,8 @@ extension ChatViewController: URLSessionDataDelegate {
                     self.tokenLabel.stringValue = "⚡ \(self.formatNumber(self.totalPromptTokens)) + \(self.formatNumber(self.totalCompletionTokens + self.streamCharCount / 3)) = \(self.formatNumber(liveTotal)) tok"
                     self.statusLabel.stringValue = "📝 生成回复..."
                 }
+            } else {
+                print("[SSE Warning] output_text.delta 缺少 delta 字段")
             }
             
         case "response.completed":
@@ -833,6 +1111,9 @@ extension ChatViewController: URLSessionDataDelegate {
                 }
             }
             DispatchQueue.main.async { self.statusLabel.stringValue = "🤖 就绪" }
+            // 收到 completed 事件，需要 finalize 来结束流式状态
+            // 延迟一小段时间确保 JS DOM 已渲染完
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.finalizeAndUpdateStats() }
             
         case "response.failed":
             if let err = j["error"] as? [String: Any], let msg = err["message"] as? String {
@@ -840,6 +1121,8 @@ extension ChatViewController: URLSessionDataDelegate {
                     self.js("addMessage('assistant','❌ 错误: \(self.escJS(msg))')")
                 }
             }
+            // 失败也需要结束
+            DispatchQueue.main.async { self.finalizeAndUpdateStats() }
             
         default:
             break
@@ -847,6 +1130,10 @@ extension ChatViewController: URLSessionDataDelegate {
     }
     
     private func finalizeAndUpdateStats() {
+        // 幂等锁：防止重复调用（response.completed + [DONE] 双重触发）
+        guard !isFinalizing else { return }
+        isFinalizing = true
+        
         let getJS = """
             (function(){
                 var e=document.getElementById('s');
@@ -883,12 +1170,27 @@ extension ChatViewController: URLSessionDataDelegate {
                 self.js("addMessage('assistant','❌ \(self.escJS(e.localizedDescription))')")
                 self.js("rt()")
                 self.stopGenerating()
+            } else if error == nil && self.isGenerating {
+                // 连接正常关闭但还没 finalize（兜底：防止 pending 卡死）
+                self.finalizeAndUpdateStats()
             }
         }
     }
     
     private func switchToConversation(_ index: Int) {
-        guard conversations.indices.contains(index) else { return }
+        guard !conversations.isEmpty else {
+            print("[Error] switchToConversation: 无可用会话")
+            return
+        }
+        guard conversations.indices.contains(index) else {
+            print("[Error] switchToConversation: index \(index) out of range (count: \(conversations.count))")
+            // 自动回退到第一个可用会话
+            if conversations.indices.contains(0) {
+                currentConversationIndex = 0
+                conversationTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            }
+            return
+        }
         currentConversationIndex = index
         totalPromptTokens = 0
         totalCompletionTokens = 0
@@ -899,10 +1201,15 @@ extension ChatViewController: URLSessionDataDelegate {
         let html = chatHTML()
         webView.loadHTMLString(html, baseURL: nil)
         // Re-add all messages to webview after load
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            for msg in conv.messages {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self = self else { return }
+            for (msgIndex, msg) in conv.messages.enumerated() {
                 let role = msg["role"] ?? "user"
                 let content = msg["content"] ?? ""
+                guard !content.isEmpty else {
+                    print("[Warning] Message \(msgIndex) has empty content, skipping")
+                    continue
+                }
                 self.js("addMessage('\(self.escJS(role))','\(self.escJS(content))')")
             }
         }

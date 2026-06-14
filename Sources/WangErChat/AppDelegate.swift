@@ -2,6 +2,8 @@ import AppKit
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
+    
+    static let appVersion = "v0.2.1"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let viewController = ChatViewController()
@@ -13,7 +15,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.center()
-        window.title = "王二助手"
+        window.title = "王二助手 \(Self.appVersion)"
         window.contentViewController = viewController
         window.makeKeyAndOrderFront(nil)
         window.delegate = self
