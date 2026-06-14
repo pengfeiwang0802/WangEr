@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+import UniformTypeIdentifiers
 
 // MARK: - 数据模型
 struct Conversation: Codable {
@@ -60,8 +61,18 @@ class ChatViewController: NSViewController {
     private let agentPanelDivider = NSBox()
     
     // 聊天区
-    private let webView = WKWebView()
+    private let webView: WKWebView = {
+        let config = WKWebViewConfiguration()
+        let userController = WKUserContentController()
+        config.userContentController = userController
+        return WKWebView(frame: .zero, configuration: config)
+    }()
     private let textView = SendTextView()
+    
+    // 文件拖拽
+    private let dropTargetView = DropTargetView()
+    private let dropIndicator = NSView()
+    private let dropLabel = NSTextField()
     private let textScrollView = NSScrollView()
     private let sendButton = NSButton()
     private let stopButton = NSButton()
@@ -124,12 +135,16 @@ class ChatViewController: NSViewController {
         setupChatArea()
         loadAvailableModels()
         setupModelMenu()
+        setupFileDragDrop()
+        setupDropIndicator()
         // 加载持久化的会话，没有则创建默认
         loadConversations()
         if conversations.isEmpty {
             conversations = [Conversation(title: "💬 新对话 1")]
         }
         loadChatHTML()
+        // 注册 JS 消息处理
+        webView.configuration.userContentController.add(self, name: "fileOpen")
         setupAgentPanel()
         updateUsageDisplay()
         fetchBalance()
@@ -283,6 +298,7 @@ class ChatViewController: NSViewController {
     private func setupChatArea() {
         webView.translatesAutoresizingMaskIntoConstraints = false
         webView.setValue(false, forKey: "drawsBackground")
+        webView.uiDelegate = self
         chatContainer.addSubview(webView)
         
         // NSTextView with Command+Enter handling
@@ -663,6 +679,69 @@ class ChatViewController: NSViewController {
         modelMenu.items.forEach { $0.state = .off }; sender.state = .on
         currentModel = sender.title; modelButton.title = "🧠 \(currentModel) ▾"; modelLabel.stringValue = "🤖 \(currentModel)"
     }
+    // MARK: - 文件拖拽
+    private func setupFileDragDrop() {
+        dropTargetView.translatesAutoresizingMaskIntoConstraints = false
+        dropTargetView.wantsLayer = true
+        dropTargetView.layer?.backgroundColor = NSColor.clear.cgColor
+        dropTargetView.isHidden = true
+        chatContainer.addSubview(dropTargetView, positioned: .above, relativeTo: webView)
+        
+        dropTargetView.onDragEnter = { [weak self] in self?.showDropIndicator() }
+        dropTargetView.onDragExit = { [weak self] in self?.hideDropIndicator() }
+        dropTargetView.onFileDrop = { [weak self] url in
+            self?.hideDropIndicator()
+            self?.handleDroppedFile(url: url)
+        }
+        
+        NSLayoutConstraint.activate([
+            dropTargetView.topAnchor.constraint(equalTo: webView.topAnchor),
+            dropTargetView.leadingAnchor.constraint(equalTo: webView.leadingAnchor),
+            dropTargetView.trailingAnchor.constraint(equalTo: webView.trailingAnchor),
+            dropTargetView.bottomAnchor.constraint(equalTo: webView.bottomAnchor),
+        ])
+    }
+    
+    private func setupDropIndicator() {
+        dropIndicator.translatesAutoresizingMaskIntoConstraints = false
+        dropIndicator.wantsLayer = true
+        dropIndicator.layer?.backgroundColor = NSColor(calibratedRed: 0, green: 0.48, blue: 1, alpha: 0.08).cgColor
+        dropIndicator.layer?.borderColor = NSColor(calibratedRed: 0, green: 0.48, blue: 1, alpha: 0.3).cgColor
+        dropIndicator.layer?.borderWidth = 2
+        dropIndicator.layer?.cornerRadius = 12
+        dropIndicator.isHidden = true
+        chatContainer.addSubview(dropIndicator, positioned: .above, relativeTo: dropTargetView)
+        
+        dropLabel.translatesAutoresizingMaskIntoConstraints = false
+        dropLabel.stringValue = "📁 拖放文件到此处"
+        dropLabel.font = NSFont.systemFont(ofSize: 16, weight: .medium)
+        dropLabel.textColor = NSColor(calibratedRed: 0, green: 0.48, blue: 1, alpha: 0.6)
+        dropLabel.alignment = .center
+        dropLabel.isEditable = false
+        dropLabel.isBordered = false
+        dropLabel.backgroundColor = .clear
+        dropIndicator.addSubview(dropLabel)
+        
+        NSLayoutConstraint.activate([
+            dropIndicator.topAnchor.constraint(equalTo: webView.topAnchor),
+            dropIndicator.leadingAnchor.constraint(equalTo: webView.leadingAnchor),
+            dropIndicator.trailingAnchor.constraint(equalTo: webView.trailingAnchor),
+            dropIndicator.bottomAnchor.constraint(equalTo: webView.bottomAnchor),
+            dropLabel.centerXAnchor.constraint(equalTo: dropIndicator.centerXAnchor),
+            dropLabel.centerYAnchor.constraint(equalTo: dropIndicator.centerYAnchor),
+        ])
+    }
+    
+    private func showDropIndicator() {
+        dropIndicator.isHidden = false
+        dropTargetView.isHidden = false
+    }
+    
+    private func hideDropIndicator() {
+        dropIndicator.isHidden = true
+        dropTargetView.isHidden = true
+    }
+    
     // MARK: - Agent 参数面板
     private func setupAgentPanel() {
         agentPanelView.translatesAutoresizingMaskIntoConstraints = false
@@ -814,7 +893,7 @@ class ChatViewController: NSViewController {
     private func loadChatHTML() { webView.loadHTMLString(chatHTML(), baseURL: nil) }
     private func chatHTML() -> String { return """
         <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark">
-        <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,"SF Pro","PingFang SC",sans-serif;font-size:14px;line-height:1.6;padding:16px;color:#1d1d1f}@media(prefers-color-scheme:dark){body{color:#f5f5f7}}.message{margin-bottom:16px;padding:10px 14px;border-radius:12px;max-width:85%;word-wrap:break-word;white-space:pre-wrap}.user{background:#007aff;color:white;margin-left:auto;border-bottom-right-radius:4px}.assistant{background:#e9e9eb;margin-right:auto;border-bottom-left-radius:4px}@media(prefers-color-scheme:dark){.assistant{background:#2c2c2e}}.message code{font-family:"SF Mono",Menlo,monospace;font-size:13px}.typing{opacity:.5;animation:blink 1s ease-in-out infinite}@keyframes blink{50%{opacity:.2}}.time{font-size:11px;opacity:.5;margin-top:4px}#messages{padding-bottom:8px}.welcome{text-align:center;margin-top:40%;opacity:.4}.welcome h2{font-size:24px;margin-bottom:8px}.welcome p{font-size:14px}</style></head><body>
+        <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,"SF Pro","PingFang SC",sans-serif;font-size:14px;line-height:1.6;padding:16px;color:#1d1d1f}@media(prefers-color-scheme:dark){body{color:#f5f5f7}}.message{margin-bottom:16px;padding:10px 14px;border-radius:12px;max-width:85%;word-wrap:break-word;white-space:pre-wrap}.user{background:#007aff;color:white;margin-left:auto;border-bottom-right-radius:4px}.assistant{background:#e9e9eb;margin-right:auto;border-bottom-left-radius:4px}@media(prefers-color-scheme:dark){.assistant{background:#2c2c2e}}.message code{font-family:"SF Mono",Menlo,monospace;font-size:13px}.typing{opacity:.5;animation:blink 1s ease-in-out infinite}@keyframes blink{50%{opacity:.2}}.time{font-size:11px;opacity:.5;margin-top:4px}#messages{padding-bottom:8px}.welcome{text-align:center;margin-top:40%;opacity:.4}.welcome h2{font-size:24px;margin-bottom:8px}.welcome p{font-size:14px}.file-card{display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(0,122,255,0.08);border-radius:10px;border:1px solid rgba(0,122,255,0.15);margin-top:6px;cursor:pointer;transition:background 0.15s}.file-card:hover{background:rgba(0,122,255,0.14)}.file-icon{font-size:28px;flex-shrink:0}.file-info{flex:1;min-width:0}.file-name{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-size{font-size:11px;opacity:.6;margin-top:1px}.file-badge{font-size:11px;padding:2px 8px;border-radius:4px;background:rgba(0,122,255,0.12);color:#007aff;font-weight:500}.image-preview{max-width:min(100%,400px);max-height:320px;border-radius:10px;margin-top:6px;cursor:pointer;transition:opacity 0.15s;display:block;object-fit:contain}.image-preview:hover{opacity:0.85}.user .file-card,.user .file-badge{background:rgba(255,255,255,0.15);border-color:rgba(255,255,255,0.2)}.user .file-badge{color:rgba(255,255,255,0.9)}@media(prefers-color-scheme:dark){.file-card{background:rgba(0,122,255,0.12);border-color:rgba(0,122,255,0.2)}.file-card:hover{background:rgba(0,122,255,0.2)}}.img-grid{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.img-grid .image-preview{max-width:200px;max-height:200px;margin-top:0}.code-preview{margin-top:6px;border-radius:8px;overflow:hidden;border:1px solid rgba(128,128,128,0.2)}.code-preview pre{margin:0;padding:10px 14px;font-family:"SF Mono",Menlo,monospace;font-size:12px;line-height:1.5;overflow-x:auto;background:rgba(128,128,128,0.06);white-space:pre-wrap;word-break:break-word}.code-preview .code-header{display:flex;justify-content:space-between;align-items:center;padding:4px 10px;font-size:11px;background:rgba(128,128,128,0.08);color:rgba(128,128,128,0.7)}.code-preview .code-header .lang{font-weight:600;text-transform:uppercase}</style></head><body>
         <div id="messages"><div class="welcome"><h2>👋 你好，王鹏飞</h2><p>发送消息开始对话</p></div></div>
         <script>
         function addMessage(r,c){try{removeWelcome();var m=document.getElementById('messages');if(!m)return null;var d=document.createElement('div');d.className='message '+r;d.innerHTML='<p>'+esc(c)+'</p>';var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);d.scrollIntoView({behavior:'smooth'});return d}catch(e){console.error('addMessage:',e);return null}}
@@ -824,6 +903,9 @@ class ChatViewController: NSViewController {
         function removeWelcome(){var e=document.querySelector('.welcome');if(e)e.remove()}
         function at(){var m=document.getElementById('messages'),d=document.createElement('div');d.className='message assistant typing';d.id='t';d.innerHTML='<p>🤔 思考中...</p>';m.appendChild(d);d.scrollIntoView({behavior:'smooth'})}
         function rt(){var e=document.getElementById('t');if(e)e.remove()}
+        function addImageMessage(r,dataUrl,filename){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var d=document.createElement('div');d.className='message '+r;var p=document.createElement('p');p.textContent='📷 '+filename;d.appendChild(p);var img=document.createElement('img');img.className='image-preview';img.src=dataUrl;img.alt=filename;img.loading='lazy';img.onclick=function(){window.open(dataUrl,'_blank')};d.appendChild(img);var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);d.scrollIntoView({behavior:'smooth'})}catch(e){console.error('addImageMessage:',e)}}
+        function addFileCard(r,filename,fileSize,fileId,ext){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var d=document.createElement('div');d.className='message '+r;var p=document.createElement('p');p.textContent='📎 '+filename;d.appendChild(p);var card=document.createElement('div');card.className='file-card';var icons={'pdf':'📕','doc':'📘','docx':'📘','xls':'📗','xlsx':'📗','ppt':'📙','pptx':'📙','zip':'📦','gz':'📦','tar':'📦','js':'📄','ts':'📄','py':'📄','swift':'📄','java':'📄','cpp':'📄','txt':'📄','md':'📄','json':'📄','yaml':'📄','yml':'📄','xml':'📄','html':'📄','css':'📄','default':'📄'};var icon=icons[ext]||icons['default'];card.innerHTML='<span class="file-icon">'+icon+'</span><div class="file-info"><div class="file-name">'+esc(filename)+'</div><div class="file-size">'+fileSize+'</div></div><span class="file-badge">打开</span>';card.onclick=function(){try{window.webkit.messageHandlers.fileOpen.postMessage(fileId)}catch(e){}};d.appendChild(card);var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);d.scrollIntoView({behavior:'smooth'})}catch(e){console.error('addFileCard:',e)}}
+        function addCodeBlock(r,code,lang){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var d=document.createElement('div');d.className='message '+r;var pre=document.createElement('div');pre.className='code-preview';var h=document.createElement('div');h.className='code-header';h.innerHTML='<span class="lang">'+(lang||'code')+'</span>';pre.appendChild(h);var c=document.createElement('pre');c.textContent=code;pre.appendChild(c);d.appendChild(pre);var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);d.scrollIntoView({behavior:'smooth'})}catch(e){console.error('addCodeBlock:',e)}}
         </script></body></html>
         """}
 }
@@ -1177,6 +1259,171 @@ extension ChatViewController: URLSessionDataDelegate {
         }
     }
     
+    // MARK: - 文件发送
+    private func sendFile(data: Data, filename: String, mimeType: String) {
+        let text = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isGenerating else { return }
+        
+        // 判断是否为图片类型
+        let isImage = mimeType.hasPrefix("image/")
+        
+        // 拼消息
+        let base64 = data.base64EncodedString()
+        
+        if isImage {
+            // 图片：存缓存 + 渲染预览 + 发送
+            let fileId = saveFileToCache(data: data, filename: filename)
+            let dataUrl = "data:\(mimeType);base64,\(base64)"
+            currentMessages.append(["role": "user", "content": "[图片] \(filename)", "type": "image", "fileId": fileId])
+            js("addImageMessage('user','\(dataUrl)','\(escJS(filename))')")
+            // 发送图片到 Gateway
+            sendImageToGateway(imageData: dataUrl, filename: filename, text: text)
+        } else {
+            // 文件：存缓存 + 渲染卡片 + 发送
+            let fileId = saveFileToCache(data: data, filename: filename)
+            let ext = fileExtension(filename)
+            let fileSizeStr = formatFileSize(data.count)
+            currentMessages.append(["role": "user", "content": "[文件] \(filename)", "type": "file", "fileId": fileId, "fileSize": "\(data.count)"])
+            js("addFileCard('user','\(escJS(filename))','\(fileSizeStr)','\(fileId)','\(ext)')")
+            // 发送文件到 Gateway
+            sendFileToGateway(fileData: base64, filename: filename, mimeType: mimeType, text: text)
+        }
+        
+        textView.string = ""
+    }
+    
+    private func sendImageToGateway(imageData: String, filename: String, text: String) {
+        isGenerating = true
+        isFinalizing = false
+        sendButton.isHidden = true; stopButton.isHidden = false
+        statusBar.layer?.backgroundColor = NSColor(calibratedRed: 0.1, green: 0.45, blue: 0.9, alpha: 0.08).cgColor
+        js("at()")
+        resetSafetyTimer()
+        sseBuffer = ""
+        
+        var req = URLRequest(url: URL(string: "\(AppConfig.gatewayURL)/v1/responses")!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(AppConfig.gatewayToken)", forHTTPHeaderField: "Authorization")
+        req.setValue(currentAgentId, forHTTPHeaderField: "x-openclaw-agent-id")
+        
+        let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
+        req.setValue(mappedModel, forHTTPHeaderField: "x-openclaw-model")
+        
+        // 构建带图片的消息
+        var contentParts: [[String: Any]] = []
+        
+        // 图片内容
+        contentParts.append([
+            "type": "input_image",
+            "image_url": imageData,
+            "detail": "high"
+        ])
+        
+        // 如果有文字，加文字
+        if !text.isEmpty {
+            contentParts.append([
+                "type": "input_text",
+                "text": text
+            ])
+        }
+        
+        let inputItems: [[String: Any]] = [
+            [
+                "type": "message",
+                "role": "user",
+                "content": contentParts
+            ]
+        ]
+        
+        let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
+        do {
+            req.httpBody = try JSONSerialization.data(withJSONObject: [
+                "model": "openclaw",
+                "input": inputItems,
+                "max_output_tokens": 16384, "temperature": temperature,
+                "stream": true
+            ] as [String : Any])
+        } catch {
+            DispatchQueue.main.async {
+                self.js("addMessage('assistant','❌ 图片请求构造失败')")
+                self.stopGenerating()
+            }
+            return
+        }
+        
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 310
+        config.timeoutIntervalForResource = 600
+        let task = URLSession(configuration: config, delegate: self, delegateQueue: nil).dataTask(with: req)
+        currentStreamTask = task; task.resume()
+    }
+    
+    private func sendFileToGateway(fileData: String, filename: String, mimeType: String, text: String) {
+        isGenerating = true
+        isFinalizing = false
+        sendButton.isHidden = true; stopButton.isHidden = false
+        statusBar.layer?.backgroundColor = NSColor(calibratedRed: 0.1, green: 0.45, blue: 0.9, alpha: 0.08).cgColor
+        js("at()")
+        resetSafetyTimer()
+        sseBuffer = ""
+        
+        var req = URLRequest(url: URL(string: "\(AppConfig.gatewayURL)/v1/responses")!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(AppConfig.gatewayToken)", forHTTPHeaderField: "Authorization")
+        req.setValue(currentAgentId, forHTTPHeaderField: "x-openclaw-agent-id")
+        
+        let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
+        req.setValue(mappedModel, forHTTPHeaderField: "x-openclaw-model")
+        
+        // 构建文件消息
+        var contentParts: [[String: Any]] = []
+        
+        contentParts.append([
+            "type": "input_file",
+            "file_data": fileData,
+            "filename": filename
+        ])
+        
+        if !text.isEmpty {
+            contentParts.append([
+                "type": "input_text",
+                "text": text
+            ])
+        }
+        
+        let inputItems: [[String: Any]] = [
+            [
+                "type": "message",
+                "role": "user",
+                "content": contentParts
+            ]
+        ]
+        
+        let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
+        do {
+            req.httpBody = try JSONSerialization.data(withJSONObject: [
+                "model": "openclaw",
+                "input": inputItems,
+                "max_output_tokens": 16384, "temperature": temperature,
+                "stream": true
+            ] as [String : Any])
+        } catch {
+            DispatchQueue.main.async {
+                self.js("addMessage('assistant','❌ 文件请求构造失败')")
+                self.stopGenerating()
+            }
+            return
+        }
+        
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 310
+        config.timeoutIntervalForResource = 600
+        let task = URLSession(configuration: config, delegate: self, delegateQueue: nil).dataTask(with: req)
+        currentStreamTask = task; task.resume()
+    }
+    
     private func switchToConversation(_ index: Int) {
         guard !conversations.isEmpty else {
             print("[Error] switchToConversation: 无可用会话")
@@ -1206,11 +1453,35 @@ extension ChatViewController: URLSessionDataDelegate {
             for (msgIndex, msg) in conv.messages.enumerated() {
                 let role = msg["role"] ?? "user"
                 let content = msg["content"] ?? ""
+                let type = msg["type"] ?? ""
                 guard !content.isEmpty else {
                     print("[Warning] Message \(msgIndex) has empty content, skipping")
                     continue
                 }
-                self.js("addMessage('\(self.escJS(role))','\(self.escJS(content))')")
+                if type == "image", let fileId = msg["fileId"] {
+                    // 恢复图片消息：从缓存读文件，生成 data URL 渲染
+                    let fileURL = self.cachedFileURL(fileId: fileId)
+                    if let imageData = try? Data(contentsOf: fileURL) {
+                        let mimeType = self.mimeTypeForFile(fileId)
+                        let dataUrl = "data:\(mimeType);base64,\(imageData.base64EncodedString())"
+                        self.js("addImageMessage('\(self.escJS(role))','\(dataUrl)','\(self.escJS(content))')")
+                    } else {
+                        self.js("addMessage('\(self.escJS(role))','\(self.escJS(content)) [缓存丢失]')")
+                    }
+                } else if type == "file", let fileId = msg["fileId"] {
+                    // 恢复文件消息：渲染文件卡片
+                    let fileURL = self.cachedFileURL(fileId: fileId)
+                    let fileSize = Int(msg["fileSize"] ?? "0") ?? 0
+                    let fileSizeStr = self.formatFileSize(fileSize)
+                    let ext = self.fileExtension(fileId)
+                    if FileManager.default.fileExists(atPath: fileURL.path) {
+                        self.js("addFileCard('\(self.escJS(role))','\(self.escJS(content))','\(fileSizeStr)','\(fileId)','\(ext)')")
+                    } else {
+                        self.js("addMessage('\(self.escJS(role))','\(self.escJS(content)) [缓存丢失]')")
+                    }
+                } else {
+                    self.js("addMessage('\(self.escJS(role))','\(self.escJS(content))')")
+                }
             }
         }
     }
@@ -1229,6 +1500,162 @@ extension ChatViewController: NSTextFieldDelegate {
         }
         tf.isEditable = false
         conversationTableView.reloadData()
+    }
+}
+
+// MARK: - 拖放目标视图
+class DropTargetView: NSView {
+    var onDragEnter: (() -> Void)?
+    var onDragExit: (() -> Void)?
+    var onFileDrop: ((URL) -> Void)?
+    
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL])
+    }
+    
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes([.fileURL])
+    }
+    
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: nil) {
+            onDragEnter?()
+            return .copy
+        }
+        return []
+    }
+    
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        onDragExit?()
+    }
+    
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
+              let url = urls.first else {
+            return false
+        }
+        onFileDrop?(url)
+        return true
+    }
+}
+
+// MARK: - 文件拖拽处理
+extension ChatViewController {
+    
+    private func handleDroppedFile(url: URL) {
+        guard url.isFileURL else { return }
+        
+        do {
+            let data = try Data(contentsOf: url)
+            let filename = url.lastPathComponent
+            
+            // 获取 UTI 并映射到 MIME type
+            var mimeType = "application/octet-stream"
+            if let uti = try? url.resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier,
+               let utType = UTType(uti),
+               let preferredMIME = utType.preferredMIMEType {
+                mimeType = preferredMIME
+            }
+            
+            // 限制文件大小 (50MB)
+            let maxSize: UInt64 = 50 * 1024 * 1024
+            let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? data.count
+            guard UInt64(fileSize) <= maxSize else {
+                DispatchQueue.main.async {
+                    self.js("addMessage('assistant','⚠️ 文件超过 50MB 限制，请压缩后重试')")
+                }
+                return
+            }
+            
+            DispatchQueue.main.async {
+                self.sendFile(data: data, filename: filename, mimeType: mimeType)
+            }
+        } catch {
+            print("[File Drop] 读取文件失败: \(error)")
+            DispatchQueue.main.async {
+                self.js("addMessage('assistant','❌ 读取文件失败: \(self.escJS(error.localizedDescription))')")
+            }
+        }
+    }
+}
+
+// MARK: - WKUIDelegate (拦截文件拖拽到 WKWebView)
+extension ChatViewController: WKUIDelegate {
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        // 文件选择面板（从网页触发）
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.begin { result in
+            if result == .OK, let url = panel.url {
+                completionHandler([url])
+                self.handleDroppedFile(url: url)
+            } else {
+                completionHandler(nil)
+            }
+        }
+    }
+}
+
+// MARK: - WKScriptMessageHandler (JS → Native 消息)
+extension ChatViewController: WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "fileOpen", let fileId = message.body as? String {
+            openCachedFile(fileId: fileId)
+        }
+    }
+    
+    private func openCachedFile(fileId: String) {
+        let fileURL = cachedFileURL(fileId: fileId)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            print("[File Open] 文件不存在: \(fileId)")
+            return
+        }
+        NSWorkspace.shared.open(fileURL)
+    }
+    
+    private func cachedFileURL(fileId: String) -> URL {
+        let dir = filesCacheDir()
+        return dir.appendingPathComponent(fileId)
+    }
+    
+    private func filesCacheDir() -> URL {
+        let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = supportDir.appendingPathComponent("WangEr/files", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+    
+    private func saveFileToCache(data: Data, filename: String) -> String {
+        let dir = filesCacheDir()
+        let fileId = UUID().uuidString + "_" + filename
+        let url = dir.appendingPathComponent(fileId)
+        try? data.write(to: url)
+        return fileId
+    }
+    
+    private func formatFileSize(_ bytes: Int) -> String {
+        if bytes < 1024 { return "\(bytes) B" }
+        if bytes < 1024*1024 { return String(format: "%.1f KB", Double(bytes)/1024.0) }
+        if bytes < 1024*1024*1024 { return String(format: "%.1f MB", Double(bytes)/(1024.0*1024.0)) }
+        return String(format: "%.1f GB", Double(bytes)/(1024.0*1024.0*1024.0))
+    }
+    
+    private func fileExtension(_ filename: String) -> String {
+        return (filename as NSString).pathExtension.lowercased()
+    }
+    
+    private func mimeTypeForFile(_ filename: String) -> String {
+        let ext = fileExtension(filename)
+        let mimeMap: [String: String] = [
+            "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+            "gif": "image/gif", "webp": "image/webp", "heic": "image/heic",
+            "svg": "image/svg+xml", "bmp": "image/bmp"
+        ]
+        return mimeMap[ext] ?? "application/octet-stream"
     }
 }
 
