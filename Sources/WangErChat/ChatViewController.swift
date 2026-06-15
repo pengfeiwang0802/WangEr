@@ -1194,12 +1194,12 @@ extension ChatViewController: NSTextViewDelegate {
     private func resetSafetyTimer() {
         safetyTimer?.invalidate()
         DispatchQueue.main.async {
-            self.safetyTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: false) { [weak self] _ in
+            self.safetyTimer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: false) { [weak self] _ in
                 guard let self = self, self.isGenerating else { return }
                 self.currentStreamTask?.cancel()
                 self.currentStreamTask = nil
                 self.js("rt()")
-                self.js("addMessage('assistant','⚠️ 生成超时（5分钟），已自动中断')")
+                self.js("addMessage('assistant','⚠️ 生成超时（30分钟），已自动中断')")
                 self.stopGenerating()
             }
         }
@@ -1271,8 +1271,8 @@ AppLogger.shared.log("[DEBUG] availableModels: \(availableModels)")
             return
         }
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 310  // 比 safety timer 稍长
-        config.timeoutIntervalForResource = 600 // 10分钟总超时
+        config.timeoutIntervalForRequest = 1860  // 比 safety timer 稍长
+        config.timeoutIntervalForResource = 3600 // 60分钟总超时
         
         // 复用 URLSession，避免内存泄漏
         currentURLSession?.invalidateAndCancel()
@@ -1825,8 +1825,8 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
         }
         
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 310
-        config.timeoutIntervalForResource = 600
+        config.timeoutIntervalForRequest = 1860
+        config.timeoutIntervalForResource = 3600
         
         // 复用 URLSession
         currentURLSession?.invalidateAndCancel()
@@ -1897,8 +1897,8 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
         }
         
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 310
-        config.timeoutIntervalForResource = 600
+        config.timeoutIntervalForRequest = 1860
+        config.timeoutIntervalForResource = 3600
         
         // 复用 URLSession
         currentURLSession?.invalidateAndCancel()
