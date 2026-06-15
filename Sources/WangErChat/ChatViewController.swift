@@ -107,12 +107,53 @@ class ChatViewController: NSViewController {
     private var totalPromptTokens = 0
     private var totalCompletionTokens = 0
     private var streamCharCount = 0
+    private var jsErrorCount = 0  // JS 连续异常计数，超阈值触发 WebView 重新加载
     
     // SSE 累积缓冲区：防止 TCP 分片截断事件
     private var sseBuffer = ""
     
     /// 当前活跃的工具调用链（用于显示嵌套工具调用）
     private var activeToolStack: [String] = []
+    
+    // MARK: - 方案1&3: 增强状态管理
+    /// 状态优先级（数字越大优先级越高）
+    private enum StatusPriority: Int {
+        case ready = 0
+        case generating = 1
+        case thinking = 2
+        case toolCall = 3
+        case reasoning = 4
+    }
+    
+    /// 当前状态优先级（用于延迟覆盖逻辑）
+    private var currentStatusPriority: StatusPriority = .ready
+    /// 当前状态开始时间（用于延迟覆盖）
+    private var currentStatusStartTime: Date = Date()
+    /// 状态最小保持时间（秒）
+    private let minStatusHoldTime: TimeInterval = 1.5
+    /// 待处理的状态更新队列
+    private var pendingStatusUpdate: (text: String, priority: StatusPriority, color: NSColor, alpha: CGFloat)?
+    
+    /// 状态图标动画定时器
+    private var statusIconTimer: Timer?
+    /// 当前状态图标索引
+    private var statusIconIndex: Int = 0
+    /// 思考图标序列
+    private let thinkingIcons = ["🤔", "🧠", "💭", "🤔", "🧠", "💭"]
+    /// 工具调用图标序列
+    private let toolIcons = ["🔧", "⚙️", "🔨", "🔧", "⚙️", "🔨"]
+    
+    // MARK: - 方案2: 步骤指示器
+    /// 步骤指示器容器
+    private let stepIndicatorView = NSView()
+    /// 步骤指示器图标
+    private let stepIconLabel = NSTextField()
+    /// 步骤指示器文字
+    private let stepTextLabel = NSTextField()
+    /// 步骤进度条
+    private let stepProgressBar = NSProgressIndicator()
+    /// 步骤指示器是否可见
+    private var isStepIndicatorVisible = false
     
     // 文件缓存清理：最大 100MB，最多 100 个文件
     private let maxCacheSize: UInt64 = 100 * 1024 * 1024
@@ -146,6 +187,7 @@ class ChatViewController: NSViewController {
         setupModelMenu()
         setupFileDragDrop()
         setupDropIndicator()
+        setupStepIndicator()
         // 加载持久化的会话，没有则创建默认
         loadConversations()
         if conversations.isEmpty {
@@ -303,6 +345,186 @@ class ChatViewController: NSViewController {
         ])
     }
     
+    // MARK: - 方案2: 步骤指示器
+    private func setupStepIndicator() {
+        stepIndicatorView.translatesAutoresizingMaskIntoConstraints = false
+        stepIndicatorView.wantsLayer = true
+        stepIndicatorView.layer?.cornerRadius = 6
+        stepIndicatorView.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        stepIndicatorView.isHidden = true
+        chatContainer.addSubview(stepIndicatorView, positioned: .above, relativeTo: webView)
+        
+        stepIconLabel.translatesAutoresizingMaskIntoConstraints = false
+        stepIconLabel.stringValue = "🤔"
+        stepIconLabel.font = NSFont.systemFont(ofSize: 14)
+        stepIconLabel.isEditable = false
+        stepIconLabel.isBordered = false
+        stepIconLabel.backgroundColor = .clear
+        stepIndicatorView.addSubview(stepIconLabel)
+        
+        stepTextLabel.translatesAutoresizingMaskIntoConstraints = false
+        stepTextLabel.stringValue = ""
+        stepTextLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        stepTextLabel.textColor = .secondaryLabelColor
+        stepTextLabel.isEditable = false
+        stepTextLabel.isBordered = false
+        stepTextLabel.backgroundColor = .clear
+        stepIndicatorView.addSubview(stepTextLabel)
+        
+        stepProgressBar.translatesAutoresizingMaskIntoConstraints = false
+        stepProgressBar.style = .bar
+        stepProgressBar.isIndeterminate = false
+        stepProgressBar.minValue = 0
+        stepProgressBar.maxValue = 100
+        stepProgressBar.doubleValue = 0
+        stepProgressBar.controlSize = .small
+        stepProgressBar.isHidden = false
+        stepIndicatorView.addSubview(stepProgressBar)
+        
+        NSLayoutConstraint.activate([
+            stepIndicatorView.topAnchor.constraint(equalTo: toolbarView.bottomAnchor, constant: 2),
+            stepIndicatorView.leadingAnchor.constraint(equalTo: chatContainer.leadingAnchor, constant: 8),
+            stepIndicatorView.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -8),
+            stepIndicatorView.heightAnchor.constraint(equalToConstant: 28),
+            
+            stepIconLabel.leadingAnchor.constraint(equalTo: stepIndicatorView.leadingAnchor, constant: 8),
+            stepIconLabel.centerYAnchor.constraint(equalTo: stepIndicatorView.centerYAnchor),
+            stepIconLabel.widthAnchor.constraint(equalToConstant: 20),
+            
+            stepTextLabel.leadingAnchor.constraint(equalTo: stepIconLabel.trailingAnchor, constant: 4),
+            stepTextLabel.centerYAnchor.constraint(equalTo: stepIndicatorView.centerYAnchor),
+            stepTextLabel.trailingAnchor.constraint(lessThanOrEqualTo: stepProgressBar.leadingAnchor, constant: -8),
+            
+            stepProgressBar.trailingAnchor.constraint(equalTo: stepIndicatorView.trailingAnchor, constant: -8),
+            stepProgressBar.centerYAnchor.constraint(equalTo: stepIndicatorView.centerYAnchor),
+            stepProgressBar.widthAnchor.constraint(equalToConstant: 80),
+            stepProgressBar.heightAnchor.constraint(equalToConstant: 8),
+        ])
+    }
+    
+    /// 显示步骤指示器
+    private func showStepIndicator(icon: String, text: String, progress: Double) {
+        stepIconLabel.stringValue = icon
+        stepTextLabel.stringValue = text
+        stepProgressBar.doubleValue = min(progress, 100)
+        stepProgressBar.isHidden = false
+        
+        if !isStepIndicatorVisible {
+            isStepIndicatorVisible = true
+            stepIndicatorView.isHidden = false
+            stepIndicatorView.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.2
+                stepIndicatorView.animator().alphaValue = 1
+            }
+        }
+    }
+    
+    /// 隐藏步骤指示器
+    private func hideStepIndicator() {
+        guard isStepIndicatorVisible else { return }
+        isStepIndicatorVisible = false
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.2
+            stepIndicatorView.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            self?.stepIndicatorView.isHidden = true
+        }
+    }
+    
+    // MARK: - 方案1&3: 增强状态管理方法
+    /// 启动状态图标动画
+    private func startStatusIconAnimation(icons: [String]) {
+        stopStatusIconAnimation()
+        statusIconIndex = 0
+        statusIconTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.statusIconIndex = (self.statusIconIndex + 1) % icons.count
+            let icon = icons[self.statusIconIndex]
+            // 更新状态标签中的图标（保留文字部分）
+            let currentText = self.statusLabel.stringValue
+            if let range = currentText.range(of: " ") {
+                let textPart = currentText[range.upperBound...]
+                self.statusLabel.stringValue = "\(icon) \(textPart)"
+            }
+        }
+    }
+    
+    /// 停止状态图标动画
+    private func stopStatusIconAnimation() {
+        statusIconTimer?.invalidate()
+        statusIconTimer = nil
+    }
+    
+    /// 设置状态（带优先级和延迟覆盖）
+    private func setStatusAdvanced(_ text: String, priority: StatusPriority, color: NSColor, alpha: CGFloat) {
+        let now = Date()
+        let elapsed = now.timeIntervalSince(currentStatusStartTime)
+        
+        // 如果新状态优先级 >= 当前状态优先级，或者当前状态已超过最小保持时间，则立即更新
+        if priority.rawValue >= currentStatusPriority.rawValue || elapsed >= minStatusHoldTime {
+            applyStatusUpdate(text: text, priority: priority, color: color, alpha: alpha)
+            // 清除待处理更新
+            pendingStatusUpdate = nil
+        } else {
+            // 否则排队等待
+            pendingStatusUpdate = (text: text, priority: priority, color: color, alpha: alpha)
+        }
+    }
+    
+    /// 强制立即更新状态（用于最终状态：就绪/错误）
+    private func setStatusForce(_ text: String, priority: StatusPriority = .ready, color: NSColor = .controlBackgroundColor, alpha: CGFloat = 0) {
+        applyStatusUpdate(text: text, priority: priority, color: color, alpha: alpha)
+        pendingStatusUpdate = nil
+        stopStatusIconAnimation()
+    }
+    
+    /// 实际应用状态更新
+    private func applyStatusUpdate(text: String, priority: StatusPriority, color: NSColor, alpha: CGFloat) {
+        currentStatusPriority = priority
+        currentStatusStartTime = Date()
+        
+        // 更新状态栏
+        statusLabel.stringValue = text
+        statusLabel.needsDisplay = true
+        
+        // 设置状态栏颜色
+        if alpha > 0 {
+            statusBar.layer?.backgroundColor = color.withAlphaComponent(alpha).cgColor
+        } else {
+            statusBar.layer?.backgroundColor = nil
+        }
+        
+        // 更新步骤指示器
+        updateStepIndicator(for: priority, text: text)
+    }
+    
+    /// 根据优先级更新步骤指示器
+    private func updateStepIndicator(for priority: StatusPriority, text: String) {
+        switch priority {
+        case .ready:
+            hideStepIndicator()
+        case .generating:
+            showStepIndicator(icon: "🚀", text: "正在启动请求...", progress: 10)
+        case .thinking:
+            showStepIndicator(icon: "🤔", text: "正在思考...", progress: 30)
+        case .toolCall:
+            showStepIndicator(icon: "🔧", text: text.replacingOccurrences(of: "🔧 ", with: ""), progress: 50)
+        case .reasoning:
+            showStepIndicator(icon: "🧠", text: "深度推理中...", progress: 40)
+        }
+    }
+    
+    /// 检查并应用待处理状态更新
+    private func flushPendingStatus() {
+        guard let pending = pendingStatusUpdate else { return }
+        let elapsed = Date().timeIntervalSince(currentStatusStartTime)
+        if elapsed >= minStatusHoldTime {
+            applyStatusUpdate(text: pending.text, priority: pending.priority, color: pending.color, alpha: pending.alpha)
+            pendingStatusUpdate = nil
+        }
+    }
+    
     // MARK: - 聊天区
     private func setupChatArea() {
         webView.translatesAutoresizingMaskIntoConstraints = false
@@ -445,7 +667,7 @@ class ChatViewController: NSViewController {
                 DispatchQueue.global().asyncAfter(deadline: timeout) {
                     if task.isRunning {
                         task.terminate()
-                        print("[loadAgents] 命令超时，已终止")
+AppLogger.shared.log("[loadAgents] 命令超时，已终止")
                     }
                 }
                 task.waitUntilExit()
@@ -454,7 +676,7 @@ class ChatViewController: NSViewController {
                 if task.terminationStatus != 0 {
                     let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
                     let errorOutput = String(data: errorData, encoding: .utf8) ?? "未知错误"
-                    print("[loadAgents] 命令失败 (exit \(task.terminationStatus)): \(errorOutput)")
+AppLogger.shared.log("[loadAgents] 命令失败 (exit \(task.terminationStatus)): \(errorOutput)")
                     throw NSError(domain: "WangErChat", code: Int(task.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorOutput])
                 }
                 
@@ -469,7 +691,7 @@ class ChatViewController: NSViewController {
                     }
                 } else {
                     let output = String(data: data, encoding: .utf8) ?? ""
-                    print("[loadAgents] 解析失败或空列表，原始输出: \(output.prefix(200))")
+AppLogger.shared.log("[loadAgents] 解析失败或空列表，原始输出: \(output.prefix(200))")
                     DispatchQueue.main.async {
                         self.agents = [AgentInfo(id: "main", identityName: "王二（你）", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
                         self.agentsTableView.reloadData()
@@ -477,7 +699,7 @@ class ChatViewController: NSViewController {
                     }
                 }
             } catch {
-                print("[loadAgents] 错误: \(error)")
+AppLogger.shared.log("[loadAgents] 错误: \(error)")
                 DispatchQueue.main.async { [weak self] in
                     self?.agents = [AgentInfo(id: "main", identityName: "王二（你）", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
                     self?.agentsTableView.reloadData()
@@ -499,7 +721,7 @@ class ChatViewController: NSViewController {
             URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
                 guard let self = self else { return }
                 if let error = error {
-                    print("[Balance] DeepSeek 查询错误: \(error)")
+AppLogger.shared.log("[Balance] DeepSeek 查询错误: \(error)")
                     DispatchQueue.main.async {
                         self.dsBalance = "错误"
                         self.updateBalanceDisplay()
@@ -507,7 +729,7 @@ class ChatViewController: NSViewController {
                     return
                 }
                 guard let httpResponse = response as? HTTPURLResponse else {
-                    print("[Balance] DeepSeek 无 HTTP 响应")
+AppLogger.shared.log("[Balance] DeepSeek 无 HTTP 响应")
                     DispatchQueue.main.async {
                         self.dsBalance = "无响应"
                         self.updateBalanceDisplay()
@@ -515,7 +737,7 @@ class ChatViewController: NSViewController {
                     return
                 }
                 guard httpResponse.statusCode == 200 else {
-                    print("[Balance] DeepSeek HTTP \(httpResponse.statusCode)")
+AppLogger.shared.log("[Balance] DeepSeek HTTP \(httpResponse.statusCode)")
                     DispatchQueue.main.async {
                         self.dsBalance = "HTTP\(httpResponse.statusCode)"
                         self.updateBalanceDisplay()
@@ -539,14 +761,14 @@ class ChatViewController: NSViewController {
                             self.updateBalanceDisplay()
                         }
                     } else {
-                        print("[Balance] DeepSeek 响应结构异常: \(String(data: data, encoding: .utf8)?.prefix(200) ?? "N/A")")
+AppLogger.shared.log("[Balance] DeepSeek 响应结构异常: \(String(data: data, encoding: .utf8)?.prefix(200) ?? "N/A")")
                         DispatchQueue.main.async {
                             self.dsBalance = "解析失败"
                             self.updateBalanceDisplay()
                         }
                     }
                 } catch {
-                    print("[Balance] DeepSeek JSON 解析错误: \(error)")
+AppLogger.shared.log("[Balance] DeepSeek JSON 解析错误: \(error)")
                     DispatchQueue.main.async {
                         self.dsBalance = "解析错误"
                         self.updateBalanceDisplay()
@@ -566,7 +788,7 @@ class ChatViewController: NSViewController {
             URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
                 guard let self = self else { return }
                 if let error = error {
-                    print("[Balance] Kimi 查询错误: \(error)")
+AppLogger.shared.log("[Balance] Kimi 查询错误: \(error)")
                     DispatchQueue.main.async {
                         self.moonshotBalance = "错误"
                         self.updateBalanceDisplay()
@@ -575,7 +797,7 @@ class ChatViewController: NSViewController {
                 }
                 guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
                     let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-                    print("[Balance] Kimi HTTP \(code)")
+AppLogger.shared.log("[Balance] Kimi HTTP \(code)")
                     DispatchQueue.main.async {
                         self.moonshotBalance = "HTTP\(code)"
                         self.updateBalanceDisplay()
@@ -599,14 +821,14 @@ class ChatViewController: NSViewController {
                             self.updateBalanceDisplay()
                         }
                     } else {
-                        print("[Balance] Kimi 响应结构异常")
+AppLogger.shared.log("[Balance] Kimi 响应结构异常")
                         DispatchQueue.main.async {
                             self.moonshotBalance = "解析失败"
                             self.updateBalanceDisplay()
                         }
                     }
                 } catch {
-                    print("[Balance] Kimi JSON 解析错误: \(error)")
+AppLogger.shared.log("[Balance] Kimi JSON 解析错误: \(error)")
                     DispatchQueue.main.async {
                         self.moonshotBalance = "解析错误"
                         self.updateBalanceDisplay()
@@ -637,7 +859,7 @@ class ChatViewController: NSViewController {
         let url = URL(fileURLWithPath: path)
         
         guard FileManager.default.fileExists(atPath: path) else {
-            print("[loadAvailableModels] openclaw.json 不存在，使用默认模型")
+AppLogger.shared.log("[loadAvailableModels] openclaw.json 不存在，使用默认模型")
             availableModels = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
             return
         }
@@ -647,7 +869,7 @@ class ChatViewController: NSViewController {
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let models = json["models"] as? [String: Any],
                   let providers = models["providers"] as? [String: Any] else {
-                print("[loadAvailableModels] 解析 openclaw.json 结构失败")
+AppLogger.shared.log("[loadAvailableModels] 解析 openclaw.json 结构失败")
                 availableModels = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
                 return
             }
@@ -676,7 +898,7 @@ class ChatViewController: NSViewController {
                 currentModel = result.first?.displayName ?? "DeepSeek V4 Flash"
             }
         } catch {
-            print("[loadAvailableModels] 读取 openclaw.json 失败: \(error)")
+AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error)")
             availableModels = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
             DispatchQueue.main.async { [weak self] in
                 self?.statusLabel.stringValue = "⚠️ 模型配置读取失败"
@@ -845,7 +1067,7 @@ class ChatViewController: NSViewController {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             try data.write(to: url)
         } catch {
-            print("[Error] saveConversations failed: \(error)")
+AppLogger.shared.log("[Error] saveConversations failed: \(error)")
             DispatchQueue.main.async { [weak self] in
                 self?.statusLabel.stringValue = "⚠️ 保存失败"
             }
@@ -855,22 +1077,22 @@ class ChatViewController: NSViewController {
     private func loadConversations() {
         let url = URL(fileURLWithPath: savePath)
         guard FileManager.default.fileExists(atPath: savePath) else {
-            print("[loadConversations] 会话文件不存在，将创建新文件: \(savePath)")
+AppLogger.shared.log("[loadConversations] 会话文件不存在，将创建新文件: \(savePath)")
             return
         }
         do {
             let data = try Data(contentsOf: url)
             let loaded = try JSONDecoder().decode([Conversation].self, from: data)
             conversations = loaded
-            print("[loadConversations] 已加载 \(conversations.count) 个会话")
+AppLogger.shared.log("[loadConversations] 已加载 \(conversations.count) 个会话")
         } catch let error as DecodingError {
-            print("[loadConversations] 解析会话文件失败: \(error)")
+AppLogger.shared.log("[loadConversations] 解析会话文件失败: \(error)")
             // 备份损坏的文件
             let backupPath = savePath + ".backup.\(Int(Date().timeIntervalSince1970))"
             try? FileManager.default.copyItem(atPath: savePath, toPath: backupPath)
-            print("[loadConversations] 已备份损坏文件到: \(backupPath)")
+AppLogger.shared.log("[loadConversations] 已备份损坏文件到: \(backupPath)")
         } catch {
-            print("[loadConversations] 读取会话文件失败: \(error)")
+AppLogger.shared.log("[loadConversations] 读取会话文件失败: \(error)")
         }
     }
     
@@ -914,19 +1136,19 @@ class ChatViewController: NSViewController {
     private func loadChatHTML() { webView.loadHTMLString(chatHTML(), baseURL: nil) }
     private func chatHTML() -> String { return """
         <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark">
-        <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,"SF Pro","PingFang SC",sans-serif;font-size:14px;line-height:1.6;padding:16px;color:#1d1d1f}@media(prefers-color-scheme:dark){body{color:#f5f5f7}}.message{margin-bottom:16px;padding:10px 14px;border-radius:12px;max-width:85%;word-wrap:break-word;white-space:pre-wrap}.user{background:#007aff;color:white;margin-left:auto;border-bottom-right-radius:4px}.assistant{background:#e9e9eb;margin-right:auto;border-bottom-left-radius:4px}@media(prefers-color-scheme:dark){.assistant{background:#2c2c2e}}.message code{font-family:"SF Mono",Menlo,monospace;font-size:13px}.typing{opacity:.5;animation:blink 1s ease-in-out infinite}@keyframes blink{50%{opacity:.2}}.time{font-size:11px;opacity:.5;margin-top:4px}#messages{padding-bottom:8px}.welcome{text-align:center;margin-top:40%;opacity:.4}.welcome h2{font-size:24px;margin-bottom:8px}.welcome p{font-size:14px}.file-card{display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(0,122,255,0.08);border-radius:10px;border:1px solid rgba(0,122,255,0.15);margin-top:6px;cursor:pointer;transition:background 0.15s}.file-card:hover{background:rgba(0,122,255,0.14)}.file-icon{font-size:28px;flex-shrink:0}.file-info{flex:1;min-width:0}.file-name{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-size{font-size:11px;opacity:.6;margin-top:1px}.file-badge{font-size:11px;padding:2px 8px;border-radius:4px;background:rgba(0,122,255,0.12);color:#007aff;font-weight:500}.image-preview{max-width:min(100%,400px);max-height:320px;border-radius:10px;margin-top:6px;cursor:pointer;transition:opacity 0.15s;display:block;object-fit:contain}.image-preview:hover{opacity:0.85}.user .file-card,.user .file-badge{background:rgba(255,255,255,0.15);border-color:rgba(255,255,255,0.2)}.user .file-badge{color:rgba(255,255,255,0.9)}@media(prefers-color-scheme:dark){.file-card{background:rgba(0,122,255,0.12);border-color:rgba(0,122,255,0.2)}.file-card:hover{background:rgba(0,122,255,0.2)}}.img-grid{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.img-grid .image-preview{max-width:200px;max-height:200px;margin-top:0}.code-preview{margin-top:6px;border-radius:8px;overflow:hidden;border:1px solid rgba(128,128,128,0.2)}.code-preview pre{margin:0;padding:10px 14px;font-family:"SF Mono",Menlo,monospace;font-size:12px;line-height:1.5;overflow-x:auto;background:rgba(128,128,128,0.06);white-space:pre-wrap;word-break:break-word}.code-preview .code-header{display:flex;justify-content:space-between;align-items:center;padding:4px 10px;font-size:11px;background:rgba(128,128,128,0.08);color:rgba(128,128,128,0.7)}.code-preview .code-header .lang{font-weight:600;text-transform:uppercase}</style></head><body>
+        <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,"SF Pro","PingFang SC",sans-serif;font-size:14px;line-height:1.6;padding:16px;color:#1d1d1f;overflow-y:auto}@media(prefers-color-scheme:dark){body{color:#f5f5f7}}.message{margin-bottom:16px;padding:10px 14px;border-radius:12px;max-width:85%;word-wrap:break-word;white-space:pre-wrap}.user{background:#007aff;color:white;margin-left:auto;border-bottom-right-radius:4px}.assistant{background:#e9e9eb;margin-right:auto;border-bottom-left-radius:4px}@media(prefers-color-scheme:dark){.assistant{background:#2c2c2e}}.message code{font-family:"SF Mono",Menlo,monospace;font-size:13px}.typing{opacity:.5;animation:blink 1s ease-in-out infinite}@keyframes blink{50%{opacity:.2}}.time{font-size:11px;opacity:.5;margin-top:4px}#messages{padding-bottom:8px}.welcome{text-align:center;margin-top:40%;opacity:.4}.welcome h2{font-size:24px;margin-bottom:8px}.welcome p{font-size:14px}.file-card{display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(0,122,255,0.08);border-radius:10px;border:1px solid rgba(0,122,255,0.15);margin-top:6px;cursor:pointer;transition:background 0.15s}.file-card:hover{background:rgba(0,122,255,0.14)}.file-icon{font-size:28px;flex-shrink:0}.file-info{flex:1;min-width:0}.file-name{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-size{font-size:11px;opacity:.6;margin-top:1px}.file-badge{font-size:11px;padding:2px 8px;border-radius:4px;background:rgba(0,122,255,0.12);color:#007aff;font-weight:500}.image-preview{max-width:min(100%,400px);max-height:320px;border-radius:10px;margin-top:6px;cursor:pointer;transition:opacity 0.15s;display:block;object-fit:contain}.image-preview:hover{opacity:0.85}.user .file-card,.user .file-badge{background:rgba(255,255,255,0.15);border-color:rgba(255,255,255,0.2)}.user .file-badge{color:rgba(255,255,255,0.9)}@media(prefers-color-scheme:dark){.file-card{background:rgba(0,122,255,0.12);border-color:rgba(0,122,255,0.2)}.file-card:hover{background:rgba(0,122,255,0.2)}}.img-grid{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.img-grid .image-preview{max-width:200px;max-height:200px;margin-top:0}.code-preview{margin-top:6px;border-radius:8px;overflow:hidden;border:1px solid rgba(128,128,128,0.2)}.code-preview pre{margin:0;padding:10px 14px;font-family:"SF Mono",Menlo,monospace;font-size:12px;line-height:1.5;overflow-x:auto;background:rgba(128,128,128,0.06);white-space:pre-wrap;word-break:break-word}.code-preview .code-header{display:flex;justify-content:space-between;align-items:center;padding:4px 10px;font-size:11px;background:rgba(128,128,128,0.08);color:rgba(128,128,128,0.7)}.code-preview .code-header .lang{font-weight:600;text-transform:uppercase}</style></head><body>
         <div id="messages"><div class="welcome"><h2>👋 你好，王鹏飞</h2><p>发送消息开始对话</p></div></div>
         <script>
-        function addMessage(r,c){try{removeWelcome();var m=document.getElementById('messages');if(!m)return null;var d=document.createElement('div');d.className='message '+r;d.innerHTML='<p>'+esc(c)+'</p>';var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);d.scrollIntoView({behavior:'smooth'});return d}catch(e){console.error('addMessage:',e);return null}}
-        function apd(t){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var l=document.getElementById('s');if(!l){var d=document.createElement('div');d.className='message assistant';d.id='s';d.innerHTML='<p></p>';d.appendChild(document.createElement('div')).className='time';m.appendChild(d);l=d}var p=l.querySelector('p');if(p)p.textContent+=t;l.scrollIntoView({behavior:'smooth'})}catch(e){console.error('apd:',e)}}
+        function scrollToEnd(){try{var m=document.getElementById('messages');if(m)m.scrollIntoView({block:'end',behavior:'smooth'})}catch(e){}}function addMessage(r,c){try{removeWelcome();var m=document.getElementById('messages');if(!m)return null;var d=document.createElement('div');d.className='message '+r;d.innerHTML='<p>'+esc(c)+'</p>';var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);scrollToEnd();return d}catch(e){console.error('addMessage:',e);return null}}
+        function apd(t){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var l=document.getElementById('s');if(!l){var d=document.createElement('div');d.className='message assistant';d.id='s';d.innerHTML='<p></p>';d.appendChild(document.createElement('div')).className='time';m.appendChild(d);l=d}var p=l.querySelector('p');if(p)p.textContent+=t;scrollToEnd()}catch(e){console.error('apd:',e)}}
         function fin(){try{var e=document.getElementById('s');if(e){var t=e.querySelector('.time');if(t)t.textContent=new Date().toLocaleTimeString();e.id=''}}catch(ex){console.error('fin:',ex)}rt()}
         function esc(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
         function removeWelcome(){var e=document.querySelector('.welcome');if(e)e.remove()}
-        function at(){var m=document.getElementById('messages'),d=document.createElement('div');d.className='message assistant typing';d.id='t';d.innerHTML='<p>🤔 思考中...</p>';m.appendChild(d);d.scrollIntoView({behavior:'smooth'})}
+        function at(){var m=document.getElementById('messages'),d=document.createElement('div');d.className='message assistant typing';d.id='t';d.innerHTML='<p>🤔 思考中...</p>';m.appendChild(d);scrollToEnd()}
         function rt(){var e=document.getElementById('t');if(e)e.remove()}
-        function addImageMessage(r,dataUrl,filename){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var d=document.createElement('div');d.className='message '+r;var p=document.createElement('p');p.textContent='📷 '+filename;d.appendChild(p);var img=document.createElement('img');img.className='image-preview';img.src=dataUrl;img.alt=filename;img.loading='lazy';img.onclick=function(){window.open(dataUrl,'_blank')};d.appendChild(img);var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);d.scrollIntoView({behavior:'smooth'})}catch(e){console.error('addImageMessage:',e)}}
-        function addFileCard(r,filename,fileSize,fileId,ext){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var d=document.createElement('div');d.className='message '+r;var p=document.createElement('p');p.textContent='📎 '+filename;d.appendChild(p);var card=document.createElement('div');card.className='file-card';var icons={'pdf':'📕','doc':'📘','docx':'📘','xls':'📗','xlsx':'📗','ppt':'📙','pptx':'📙','zip':'📦','gz':'📦','tar':'📦','js':'📄','ts':'📄','py':'📄','swift':'📄','java':'📄','cpp':'📄','txt':'📄','md':'📄','json':'📄','yaml':'📄','yml':'📄','xml':'📄','html':'📄','css':'📄','default':'📄'};var icon=icons[ext]||icons['default'];card.innerHTML='<span class="file-icon">'+icon+'</span><div class="file-info"><div class="file-name">'+esc(filename)+'</div><div class="file-size">'+fileSize+'</div></div><span class="file-badge">打开</span>';card.onclick=function(){try{window.webkit.messageHandlers.fileOpen.postMessage(fileId)}catch(e){}};d.appendChild(card);var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);d.scrollIntoView({behavior:'smooth'})}catch(e){console.error('addFileCard:',e)}}
-        function addCodeBlock(r,code,lang){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var d=document.createElement('div');d.className='message '+r;var pre=document.createElement('div');pre.className='code-preview';var h=document.createElement('div');h.className='code-header';h.innerHTML='<span class="lang">'+(lang||'code')+'</span>';pre.appendChild(h);var c=document.createElement('pre');c.textContent=code;pre.appendChild(c);d.appendChild(pre);var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);d.scrollIntoView({behavior:'smooth'})}catch(e){console.error('addCodeBlock:',e)}}
+        function addImageMessage(r,dataUrl,filename){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var d=document.createElement('div');d.className='message '+r;var p=document.createElement('p');p.textContent='📷 '+filename;d.appendChild(p);var img=document.createElement('img');img.className='image-preview';img.src=dataUrl;img.alt=filename;img.loading='lazy';img.onclick=function(){window.open(dataUrl,'_blank')};d.appendChild(img);var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);scrollToEnd()}catch(e){console.error('addImageMessage:',e)}}
+        function addFileCard(r,filename,fileSize,fileId,ext){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var d=document.createElement('div');d.className='message '+r;var p=document.createElement('p');p.textContent='📎 '+filename;d.appendChild(p);var card=document.createElement('div');card.className='file-card';var icons={'pdf':'📕','doc':'📘','docx':'📘','xls':'📗','xlsx':'📗','ppt':'📙','pptx':'📙','zip':'📦','gz':'📦','tar':'📦','js':'📄','ts':'📄','py':'📄','swift':'📄','java':'📄','cpp':'📄','txt':'📄','md':'📄','json':'📄','yaml':'📄','yml':'📄','xml':'📄','html':'📄','css':'📄','default':'📄'};var icon=icons[ext]||icons['default'];card.innerHTML='<span class="file-icon">'+icon+'</span><div class="file-info"><div class="file-name">'+esc(filename)+'</div><div class="file-size">'+fileSize+'</div></div><span class="file-badge">打开</span>';card.onclick=function(){try{window.webkit.messageHandlers.fileOpen.postMessage(fileId)}catch(e){}};d.appendChild(card);var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);scrollToEnd()}catch(e){console.error('addFileCard:',e)}}
+        function addCodeBlock(r,code,lang){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var d=document.createElement('div');d.className='message '+r;var pre=document.createElement('div');pre.className='code-preview';var h=document.createElement('div');h.className='code-header';h.innerHTML='<span class="lang">'+(lang||'code')+'</span>';pre.appendChild(h);var c=document.createElement('pre');c.textContent=code;pre.appendChild(c);d.appendChild(pre);var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);scrollToEnd()}catch(e){console.error('addCodeBlock:',e)}}
         </script></body></html>
         """}
 }
@@ -1005,7 +1227,9 @@ extension ChatViewController: NSTextViewDelegate {
         isGenerating = true
         isFinalizing = false
         sendButton.isHidden = true; stopButton.isHidden = false
-        statusBar.layer?.backgroundColor = NSColor(calibratedRed: 0.1, green: 0.45, blue: 0.9, alpha: 0.08).cgColor
+        // 方案1&3: 使用增强状态系统
+        setStatusAdvanced("🚀 正在启动请求...", priority: .generating, color: .systemBlue, alpha: 0.30)
+        showStepIndicator(icon: "🚀", text: "正在启动请求...", progress: 10)
         js("at()")
         resetSafetyTimer()
         sseBuffer = ""
@@ -1028,8 +1252,8 @@ extension ChatViewController: NSTextViewDelegate {
         }
         // 找到当前选中模型的 API ID
         let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
-        print("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedModel)")
-        print("[DEBUG] availableModels: \(availableModels)")
+AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedModel)")
+AppLogger.shared.log("[DEBUG] availableModels: \(availableModels)")
         req.setValue(mappedModel, forHTTPHeaderField: "x-openclaw-model")
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
         do {
@@ -1060,29 +1284,40 @@ extension ChatViewController: NSTextViewDelegate {
     
     private func stopGenerating() {
         isGenerating = false; isFinalizing = false; sendButton.isHidden = false; stopButton.isHidden = true
-        statusBar.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        statusLabel.stringValue = "🤖 就绪"
+        // 方案1&3: 使用增强状态系统
+        setStatusForce("🤖 就绪", priority: .ready)
+        hideStepIndicator()
+        stopStatusIconAnimation()
+        setStatusBarColor(.clear, alpha: 0)
         safetyTimer?.invalidate()
     }
     
     fileprivate func js(_ code: String) {
-        webView.evaluateJavaScript(code) { _, error in
+        webView.evaluateJavaScript(code) { [weak self] _, error in
+            guard let self = self else { return }
             if let error = error {
                 let nsError = error as NSError
-                // WKErrorJavaScriptResultTypeIsUnsupported (code 5) is harmless:
-                // it means the JS expression returned a DOM element or other
-                // type that WKWebView can't serialize. Our calls don't depend
-                // on return values, so we can safely skip it.
                 if nsError.domain == "WKErrorDomain" && nsError.code == 5 {
                     return
                 }
-                print("[JS Error] \(nsError.domain) \(nsError.code): \(nsError.localizedDescription)")
+                AppLogger.shared.log("[JS Error] \(nsError.domain) \(nsError.code): \(nsError.localizedDescription) code=\(code.prefix(80))")
                 if let line = nsError.userInfo["WKJavaScriptExceptionLineNumber"] as? Int {
-                    print("[JS Error]  Line: \(line)")
+                    AppLogger.shared.log("[JS Error]  Line: \(line)")
                 }
                 if let col = nsError.userInfo["WKJavaScriptExceptionColumnNumber"] as? Int {
-                    print("[JS Error]  Col: \(col)")
+                    AppLogger.shared.log("[JS Error]  Col: \(col)")
                 }
+                self.jsErrorCount += 1
+                if self.jsErrorCount >= 5 {
+                    AppLogger.shared.log("[WebView] JS 连续崩溃 \(self.jsErrorCount) 次，重新加载 WebView")
+                    self.jsErrorCount = 0
+                    DispatchQueue.main.async {
+                        let html = self.chatHTML()
+                        self.webView.loadHTMLString(html, baseURL: nil)
+                    }
+                }
+            } else {
+                self.jsErrorCount = 0
             }
         }
     }
@@ -1101,7 +1336,7 @@ extension ChatViewController: URLSessionDataDelegate {
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         guard !data.isEmpty else { return }
         guard let chunk = String(data: data, encoding: .utf8) else {
-            print("[SSE Error] 无法将数据解码为 UTF-8")
+AppLogger.shared.log("[SSE Error] 无法将数据解码为 UTF-8")
             DispatchQueue.main.async {
                 self.js("addMessage('assistant','❌ 接收数据解码失败')")
                 self.finalizeAndUpdateStats()
@@ -1238,17 +1473,17 @@ extension ChatViewController: URLSessionDataDelegate {
         guard !data.isEmpty else { return }
         
         guard let d = data.data(using: .utf8) else {
-            print("[SSE Error] 无法将 event data 转为 Data")
+AppLogger.shared.log("[SSE Error] 无法将 event data 转为 Data")
             return
         }
         
         guard let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
-            print("[SSE Error] JSON 解析失败: \(data.prefix(200))")
+AppLogger.shared.log("[SSE Error] JSON 解析失败: \(data.prefix(200))")
             return
         }
         
         guard let type = j["type"] as? String else {
-            print("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200))")
+AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200))")
             return
         }
         
@@ -1256,15 +1491,17 @@ extension ChatViewController: URLSessionDataDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             
+            // 方案1&3: 使用增强状态系统
             switch type {
             case "response.created":
                 self.resetToolStack()
-                self.setStatusBarColor(.systemBlue, alpha: 0.08)
-                self.setStatus("🤖 启动...")
+                self.setStatusAdvanced("🤖 启动...", priority: .thinking, color: .systemBlue, alpha: 0.30)
+                self.showStepIndicator(icon: "🚀", text: "正在启动请求...", progress: 10)
                 
             case "response.in_progress":
-                self.setStatusBarColor(.systemBlue, alpha: 0.12)
-                self.setStatus("🤖 思考中...")
+                self.setStatusAdvanced("🤖 思考中...", priority: .thinking, color: .systemBlue, alpha: 0.35)
+                self.showStepIndicator(icon: "🤔", text: "正在思考...", progress: 30)
+                self.startStatusIconAnimation(icons: self.thinkingIcons)
                 
             case "response.output_item.added":
                 if let item = j["item"] as? [String: Any], item["type"] as? String == "function_call" {
@@ -1274,46 +1511,46 @@ extension ChatViewController: URLSessionDataDelegate {
                     let summary = self.toolArgsSummary(args)
                     self.pushTool(name)
                     
-                    self.setStatusBarColor(.systemOrange, alpha: 0.12)
+                    let statusText: String
                     if !summary.isEmpty {
-                        self.setStatus("🔧 \(friendlyName): \(summary)")
+                        statusText = "🔧 \(friendlyName): \(summary)"
                     } else {
-                        self.setStatus("🔧 调用工具: \(friendlyName)")
+                        statusText = "🔧 调用工具: \(friendlyName)"
                     }
+                    self.setStatusAdvanced(statusText, priority: .toolCall, color: .systemOrange, alpha: 0.50)
+                    self.showStepIndicator(icon: "🔧", text: "正在调用 \(friendlyName)...", progress: 50)
+                    self.startStatusIconAnimation(icons: self.toolIcons)
                 } else if let item = j["item"] as? [String: Any], item["type"] as? String == "reasoning" {
-                    self.setStatusBarColor(.systemPurple, alpha: 0.10)
-                    self.setStatus("🧠 深度思考...")
+                    self.setStatusAdvanced("🧠 深度思考...", priority: .reasoning, color: .systemPurple, alpha: 0.45)
+                    self.showStepIndicator(icon: "🧠", text: "深度推理中...", progress: 40)
                 } else {
-                    self.setStatusBarColor(.systemBlue, alpha: 0.12)
-                    self.setStatus("🤖 思考中...")
+                    self.setStatusAdvanced("🤖 思考中...", priority: .thinking, color: .systemBlue, alpha: 0.35)
+                    self.showStepIndicator(icon: "🤔", text: "正在思考...", progress: 30)
                 }
                 
             case "response.content_part.added":
                 if let part = j["part"] as? [String: Any], part["type"] as? String == "text" {
-                    self.setStatusBarColor(.systemGreen, alpha: 0.10)
-                    self.setStatus("✍️ 准备输出...")
+                    self.setStatusAdvanced("✍️ 准备输出...", priority: .generating, color: .systemGreen, alpha: 0.35)
+                    self.showStepIndicator(icon: "✍️", text: "准备输出内容...", progress: 60)
                 }
                 
             case "response.function_call_arguments.delta":
                 if let delta = j["delta"] as? String, !delta.isEmpty {
-                    self.setStatusBarColor(.systemOrange, alpha: 0.15)
-                    self.setStatus("🔧 参数输入中...")
+                    self.setStatusAdvanced("🔧 参数输入中...", priority: .toolCall, color: .systemOrange, alpha: 0.50)
                 }
                 
             case "response.function_call_arguments.done":
                 if let name = j["name"] as? String {
                     let friendlyName = self.friendlyToolName(name)
-                    self.setStatusBarColor(.systemOrange, alpha: 0.10)
-                    self.setStatus("✅ 参数就绪: \(friendlyName)")
+                    self.setStatusAdvanced("✅ 参数就绪: \(friendlyName)", priority: .toolCall, color: .systemOrange, alpha: 0.35)
                 }
                 
             case "response.reasoning_text.delta":
-                self.setStatusBarColor(.systemPurple, alpha: 0.15)
-                self.setStatus("🧠 深度思考...")
+                self.setStatusAdvanced("🧠 深度思考...", priority: .reasoning, color: .systemPurple, alpha: 0.50)
+                self.showStepIndicator(icon: "🧠", text: "深度推理中...", progress: 40)
                 
             case "response.reasoning_summary_text.delta":
-                self.setStatusBarColor(.systemPurple, alpha: 0.12)
-                self.setStatus("🧠 推理总结中...")
+                self.setStatusAdvanced("🧠 推理总结中...", priority: .reasoning, color: .systemPurple, alpha: 0.40)
                 
             case "response.output_text.delta":
                 if let content = j["delta"] as? String {
@@ -1321,25 +1558,26 @@ extension ChatViewController: URLSessionDataDelegate {
                     self.streamCharCount += content.count
                     let liveTotal = self.totalPromptTokens + self.totalCompletionTokens + self.streamCharCount / 3
                     self.tokenLabel.stringValue = "⚡ \(self.formatNumber(self.totalPromptTokens)) + \(self.formatNumber(self.totalCompletionTokens + self.streamCharCount / 3)) = \(self.formatNumber(liveTotal)) tok"
-                    self.setStatus("📝 生成回复...")
+                    self.setStatusAdvanced("📝 生成回复...", priority: .generating, color: .systemGreen, alpha: 0.40)
+                    self.showStepIndicator(icon: "📝", text: "正在生成回复...", progress: 75)
+                    self.stopStatusIconAnimation()
                 } else {
-                    print("[SSE Warning] output_text.delta 缺少 delta 字段")
+AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
                 }
                 
             case "response.output_text.done":
-                self.setStatusBarColor(.systemGreen, alpha: 0.08)
-                self.setStatus("✅ 输出完成")
+                self.setStatusAdvanced("✅ 输出完成", priority: .generating, color: .systemGreen, alpha: 0.30)
+                self.showStepIndicator(icon: "✅", text: "回复生成完成", progress: 100)
                 
             case "response.content_part.done":
                 if let part = j["part"] as? [String: Any] {
                     if part["type"] as? String == "function_call" {
                         let name = part["name"] as? String ?? ""
                         let friendlyName = self.friendlyToolName(name)
-                        self.setStatusBarColor(.systemOrange, alpha: 0.08)
-                        self.setStatus("✅ 工具完成: \(friendlyName)")
+                        self.setStatusAdvanced("✅ 工具完成: \(friendlyName)", priority: .toolCall, color: .systemOrange, alpha: 0.30)
+                        self.showStepIndicator(icon: "✅", text: "工具执行完成: \(friendlyName)", progress: 65)
                     } else {
-                        self.setStatusBarColor(.systemGreen, alpha: 0.06)
-                        self.setStatus("✅ 内容块完成")
+                        self.setStatusAdvanced("✅ 内容块完成", priority: .generating, color: .systemGreen, alpha: 0.25)
                     }
                 }
                 
@@ -1351,14 +1589,14 @@ extension ChatViewController: URLSessionDataDelegate {
                         self.popTool()
                         let remaining = self.activeToolStack.count
                         if remaining > 0 {
-                            self.setStatus("🔧 等待工具返回: \(friendlyName)")
+                            self.setStatusAdvanced("🔧 等待工具返回: \(friendlyName)", priority: .toolCall, color: .systemOrange, alpha: 0.35)
                         } else {
-                            self.setStatusBarColor(.systemBlue, alpha: 0.08)
-                            self.setStatus("🔧 工具已调用: \(friendlyName)")
+                            self.setStatusAdvanced("🔧 工具已调用: \(friendlyName)", priority: .toolCall, color: .systemBlue, alpha: 0.30)
+                            self.showStepIndicator(icon: "🔧", text: "工具已调用: \(friendlyName)", progress: 55)
                         }
                     } else if item["type"] as? String == "reasoning" {
-                        self.setStatusBarColor(.systemBlue, alpha: 0.10)
-                        self.setStatus("🤖 思考完成，准备回复...")
+                        self.setStatusAdvanced("🤖 思考完成，准备回复...", priority: .thinking, color: .systemBlue, alpha: 0.30)
+                        self.showStepIndicator(icon: "🤔", text: "思考完成，准备回复...", progress: 60)
                     }
                 }
                 
@@ -1372,20 +1610,22 @@ extension ChatViewController: URLSessionDataDelegate {
                     }
                     self.updateUsageDisplay()
                 }
-                self.resetStatusBarColor()
-                self.setStatus("🤖 就绪")
+                self.setStatusForce("🤖 就绪", priority: .ready, color: .clear, alpha: 0)
+                self.hideStepIndicator()
+                self.stopStatusIconAnimation()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.finalizeAndUpdateStats() }
                 
             case "response.failed":
                 if let err = j["error"] as? [String: Any], let msg = err["message"] as? String {
                     self.js("addMessage('assistant','❌ 错误: \(self.escJS(msg))')")
                 }
-                self.resetStatusBarColor()
-                self.setStatus("❌ 请求失败")
+                self.setStatusForce("❌ 请求失败", priority: .ready, color: .systemRed, alpha: 0.35)
+                self.hideStepIndicator()
+                self.stopStatusIconAnimation()
                 DispatchQueue.main.async { self.finalizeAndUpdateStats() }
                 
             default:
-                print("[SSE] 未处理事件类型: \(type)")
+AppLogger.shared.log("[SSE] 未处理事件类型: \(type)")
                 break
             }
         }
@@ -1419,7 +1659,7 @@ extension ChatViewController: URLSessionDataDelegate {
             self.webView.evaluateJavaScript(getJS) { [weak self] r, error in
                 guard let self = self else { return }
                 if let error = error {
-                    print("[finalize] JS 执行错误: \(error)")
+AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
                 }
                 if let t = r as? String, !t.isEmpty {
                     self.currentMessages.append(["role": "assistant", "content": t])
@@ -1438,13 +1678,28 @@ extension ChatViewController: URLSessionDataDelegate {
     
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         DispatchQueue.main.async {
-            if let e = error as NSError?, e.code != NSURLErrorCancelled {
-                self.js("addMessage('assistant','❌ \(self.escJS(e.localizedDescription))')")
-                self.js("rt()")
-                self.stopGenerating()
+            if let e = error as NSError? {
+                if e.code == NSURLErrorCancelled {
+                    AppLogger.shared.log("[Stream] 手动取消 (NSURLErrorCancelled)")
+                    return
+                }
+                AppLogger.shared.log("[Stream Error] 流中断: \(e.domain) code=\(e.code) \(e.localizedDescription)")
+                if self.isGenerating && !self.isFinalizing {
+                    self.js("addMessage('assistant','⚠️ 连接中断: \(self.escJS(e.localizedDescription))')")
+                    self.js("rt()")
+                    self.finalizeAndUpdateStats()
+                } else {
+                    AppLogger.shared.log("[Stream] 强制复位 (isGenerating=\(self.isGenerating) isFinalizing=\(self.isFinalizing))")
+                    self.stopGenerating()
+                }
             } else if error == nil && self.isGenerating {
-                // 连接正常关闭但还没 finalize（兜底：防止 pending 卡死）
-                self.finalizeAndUpdateStats()
+                AppLogger.shared.log("[Stream] 连接正常关闭，执行兜底 finalize")
+                if !self.isFinalizing {
+                    self.finalizeAndUpdateStats()
+                } else {
+                    AppLogger.shared.log("[Stream] isFinalizing=true，直接 stopGenerating")
+                    self.stopGenerating()
+                }
             }
         }
     }
@@ -1486,7 +1741,9 @@ extension ChatViewController: URLSessionDataDelegate {
         isGenerating = true
         isFinalizing = false
         sendButton.isHidden = true; stopButton.isHidden = false
-        statusBar.layer?.backgroundColor = NSColor(calibratedRed: 0.1, green: 0.45, blue: 0.9, alpha: 0.08).cgColor
+        // 方案1&3: 使用增强状态系统
+        setStatusAdvanced("🖼️ 发送图片: \(filename)", priority: .generating, color: .systemBlue, alpha: 0.30)
+        showStepIndicator(icon: "🖼️", text: "发送图片...", progress: 10)
         js("at()")
         resetSafetyTimer()
         sseBuffer = ""
@@ -1558,7 +1815,9 @@ extension ChatViewController: URLSessionDataDelegate {
         isGenerating = true
         isFinalizing = false
         sendButton.isHidden = true; stopButton.isHidden = false
-        statusBar.layer?.backgroundColor = NSColor(calibratedRed: 0.1, green: 0.45, blue: 0.9, alpha: 0.08).cgColor
+        // 方案1&3: 使用增强状态系统
+        setStatusAdvanced("📎 发送文件: \(filename)", priority: .generating, color: .systemBlue, alpha: 0.30)
+        showStepIndicator(icon: "📎", text: "发送文件...", progress: 10)
         js("at()")
         resetSafetyTimer()
         sseBuffer = ""
@@ -1626,11 +1885,11 @@ extension ChatViewController: URLSessionDataDelegate {
     
     private func switchToConversation(_ index: Int) {
         guard !conversations.isEmpty else {
-            print("[Error] switchToConversation: 无可用会话")
+AppLogger.shared.log("[Error] switchToConversation: 无可用会话")
             return
         }
         guard conversations.indices.contains(index) else {
-            print("[Error] switchToConversation: index \(index) out of range (count: \(conversations.count))")
+AppLogger.shared.log("[Error] switchToConversation: index \(index) out of range (count: \(conversations.count))")
             // 自动回退到第一个可用会话
             if conversations.indices.contains(0) {
                 currentConversationIndex = 0
@@ -1655,7 +1914,7 @@ extension ChatViewController: URLSessionDataDelegate {
                 let content = msg["content"] ?? ""
                 let type = msg["type"] ?? ""
                 guard !content.isEmpty else {
-                    print("[Warning] Message \(msgIndex) has empty content, skipping")
+AppLogger.shared.log("[Warning] Message \(msgIndex) has empty content, skipping")
                     continue
                 }
                 if type == "image", let fileId = msg["fileId"] {
@@ -1773,7 +2032,7 @@ extension ChatViewController {
                 self.sendFile(data: data, filename: filename, mimeType: mimeType)
             }
         } catch {
-            print("[File Drop] 读取文件失败: \(error)")
+AppLogger.shared.log("[File Drop] 读取文件失败: \(error)")
             DispatchQueue.main.async {
                 self.js("addMessage('assistant','❌ 读取文件失败: \(self.escJS(error.localizedDescription))')")
             }
@@ -1811,7 +2070,7 @@ extension ChatViewController: WKScriptMessageHandler {
     private func openCachedFile(fileId: String) {
         let fileURL = cachedFileURL(fileId: fileId)
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            print("[File Open] 文件不存在: \(fileId)")
+AppLogger.shared.log("[File Open] 文件不存在: \(fileId)")
             return
         }
         NSWorkspace.shared.open(fileURL)
@@ -1926,7 +2185,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
             if row >= 0 && row < agents.count {
                 currentAgentId = agents[row].id
                 updateAgentPanel(agents[row])
-                print("Switched to agent: \(currentAgentId)")
+AppLogger.shared.log("Switched to agent: \(currentAgentId)")
             }
         }
     }
