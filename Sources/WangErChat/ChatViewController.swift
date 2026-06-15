@@ -102,6 +102,7 @@ class ChatViewController: NSViewController {
     private var isGenerating = false
     private var isFinalizing = false // 幂等锁：防止 finalize 被多次调用
     private var currentStreamTask: URLSessionDataTask?
+    private var currentURLSession: URLSession?  // 用于复用和清理
     private var safetyTimer: Timer?
     private var totalPromptTokens = 0
     private var totalCompletionTokens = 0
@@ -112,6 +113,10 @@ class ChatViewController: NSViewController {
     
     /// 当前活跃的工具调用链（用于显示嵌套工具调用）
     private var activeToolStack: [String] = []
+    
+    // 文件缓存清理：最大 100MB，最多 100 个文件
+    private let maxCacheSize: UInt64 = 100 * 1024 * 1024
+    private let maxCacheFiles = 100
     
     private var currentModel = "DeepSeek V4 Flash"
     private var dsBalance: String = "--"
@@ -422,51 +427,63 @@ class ChatViewController: NSViewController {
     }
     
     private func loadAgents() {
-        let pipe = Pipe()
-        let errorPipe = Pipe()
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/bash")
-        task.arguments = ["-c", "/usr/local/bin/openclaw agents list --json 2>/dev/null || echo '[]'"]
-        task.standardOutput = pipe
-        task.standardError = errorPipe
-        
-        do {
-            try task.run()
-            task.waitUntilExit()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
             
-            // 检查命令执行是否成功
-            if task.terminationStatus != 0 {
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorOutput = String(data: errorData, encoding: .utf8) ?? "未知错误"
-                print("[loadAgents] 命令失败 (exit \(task.terminationStatus)): \(errorOutput)")
-                throw NSError(domain: "WangErChat", code: Int(task.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorOutput])
-            }
+            let pipe = Pipe()
+            let errorPipe = Pipe()
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/bin/bash")
+            task.arguments = ["-c", "/usr/local/bin/openclaw agents list --json 2>/dev/null || echo '[]'"]
+            task.standardOutput = pipe
+            task.standardError = errorPipe
             
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let list = try? JSONDecoder().decode([AgentInfo].self, from: data), !list.isEmpty {
-                DispatchQueue.main.async {
-                    self.agents = list
-                    self.agentsTableView.reloadData()
-                    if let idx = list.firstIndex(where: { $0.isDefault == true || $0.id == "main" }) {
-                        self.agentsTableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+            do {
+                try task.run()
+                // 使用 5 秒超时，避免阻塞主线程
+                let timeout = DispatchTime.now() + .seconds(5)
+                DispatchQueue.global().asyncAfter(deadline: timeout) {
+                    if task.isRunning {
+                        task.terminate()
+                        print("[loadAgents] 命令超时，已终止")
                     }
                 }
-            } else {
-                let output = String(data: data, encoding: .utf8) ?? ""
-                print("[loadAgents] 解析失败或空列表，原始输出: \(output.prefix(200))")
-                DispatchQueue.main.async {
-                    self.agents = [AgentInfo(id: "main", identityName: "王二（你）", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
-                    self.agentsTableView.reloadData()
-                    self.agentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+                task.waitUntilExit()
+                
+                // 检查命令执行是否成功
+                if task.terminationStatus != 0 {
+                    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errorOutput = String(data: errorData, encoding: .utf8) ?? "未知错误"
+                    print("[loadAgents] 命令失败 (exit \(task.terminationStatus)): \(errorOutput)")
+                    throw NSError(domain: "WangErChat", code: Int(task.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorOutput])
                 }
-            }
-        } catch {
-            print("[loadAgents] 错误: \(error)")
-            DispatchQueue.main.async { [weak self] in
-                self?.agents = [AgentInfo(id: "main", identityName: "王二（你）", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
-                self?.agentsTableView.reloadData()
-                self?.agentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-                self?.statusLabel.stringValue = "⚠️ Agents 加载失败"
+                
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                if let list = try? JSONDecoder().decode([AgentInfo].self, from: data), !list.isEmpty {
+                    DispatchQueue.main.async {
+                        self.agents = list
+                        self.agentsTableView.reloadData()
+                        if let idx = list.firstIndex(where: { $0.isDefault == true || $0.id == "main" }) {
+                            self.agentsTableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+                        }
+                    }
+                } else {
+                    let output = String(data: data, encoding: .utf8) ?? ""
+                    print("[loadAgents] 解析失败或空列表，原始输出: \(output.prefix(200))")
+                    DispatchQueue.main.async {
+                        self.agents = [AgentInfo(id: "main", identityName: "王二（你）", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
+                        self.agentsTableView.reloadData()
+                        self.agentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+                    }
+                }
+            } catch {
+                print("[loadAgents] 错误: \(error)")
+                DispatchQueue.main.async { [weak self] in
+                    self?.agents = [AgentInfo(id: "main", identityName: "王二（你）", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
+                    self?.agentsTableView.reloadData()
+                    self?.agentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+                    self?.statusLabel.stringValue = "⚠️ Agents 加载失败"
+                }
             }
         }
     }
@@ -945,6 +962,7 @@ extension ChatViewController: NSTextViewDelegate {
     
     @objc func stopGeneration() {
         currentStreamTask?.cancel(); currentStreamTask = nil
+        currentURLSession?.invalidateAndCancel(); currentURLSession = nil
         if isGenerating && !isFinalizing {
             js("fin()")
             finalizeAndUpdateStats()
@@ -1031,7 +1049,12 @@ extension ChatViewController: NSTextViewDelegate {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 310  // 比 safety timer 稍长
         config.timeoutIntervalForResource = 600 // 10分钟总超时
-        let task = URLSession(configuration: config, delegate: self, delegateQueue: nil).dataTask(with: req)
+        
+        // 复用 URLSession，避免内存泄漏
+        currentURLSession?.invalidateAndCancel()
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+        currentURLSession = session
+        let task = session.dataTask(with: req)
         currentStreamTask = task; task.resume()
     }
     
@@ -1373,6 +1396,9 @@ extension ChatViewController: URLSessionDataDelegate {
         guard !isFinalizing else { return }
         isFinalizing = true
         
+        // 先停止 typing 动画
+        js("rt()")
+        
         let getJS = """
             (function(){
                 var e=document.getElementById('s');
@@ -1386,20 +1412,27 @@ extension ChatViewController: URLSessionDataDelegate {
                 return t;
             })()
             """
-        webView.evaluateJavaScript(getJS) { [weak self] r, _ in
+        
+        // 使用弱引用避免循环引用，延迟执行避免 JS race condition
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self = self else { return }
-            self.js("rt()")
-            if let t = r as? String, !t.isEmpty {
-                self.currentMessages.append(["role": "assistant", "content": t])
-                let compTok = max(1, self.streamCharCount / 3)
-                let promptTok = max(1, (self.currentMessages.filter { $0["role"] == "user" }.last?["content"] ?? "").count / 3)
-                self.totalPromptTokens += promptTok
-                self.totalCompletionTokens += compTok
-                self.updateUsageDisplay()
+            self.webView.evaluateJavaScript(getJS) { [weak self] r, error in
+                guard let self = self else { return }
+                if let error = error {
+                    print("[finalize] JS 执行错误: \(error)")
+                }
+                if let t = r as? String, !t.isEmpty {
+                    self.currentMessages.append(["role": "assistant", "content": t])
+                    let compTok = max(1, self.streamCharCount / 3)
+                    let promptTok = max(1, (self.currentMessages.filter { $0["role"] == "user" }.last?["content"] ?? "").count / 3)
+                    self.totalPromptTokens += promptTok
+                    self.totalCompletionTokens += compTok
+                    self.updateUsageDisplay()
+                }
+                self.streamCharCount = 0
+                self.fetchBalance()
+                self.stopGenerating()
             }
-            self.streamCharCount = 0
-            self.fetchBalance()
-            self.stopGenerating()
         }
     }
     
@@ -1512,7 +1545,12 @@ extension ChatViewController: URLSessionDataDelegate {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 310
         config.timeoutIntervalForResource = 600
-        let task = URLSession(configuration: config, delegate: self, delegateQueue: nil).dataTask(with: req)
+        
+        // 复用 URLSession
+        currentURLSession?.invalidateAndCancel()
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+        currentURLSession = session
+        let task = session.dataTask(with: req)
         currentStreamTask = task; task.resume()
     }
     
@@ -1577,7 +1615,12 @@ extension ChatViewController: URLSessionDataDelegate {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 310
         config.timeoutIntervalForResource = 600
-        let task = URLSession(configuration: config, delegate: self, delegateQueue: nil).dataTask(with: req)
+        
+        // 复用 URLSession
+        currentURLSession?.invalidateAndCancel()
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+        currentURLSession = session
+        let task = session.dataTask(with: req)
         currentStreamTask = task; task.resume()
     }
     
@@ -1791,7 +1834,38 @@ extension ChatViewController: WKScriptMessageHandler {
         let fileId = UUID().uuidString + "_" + filename
         let url = dir.appendingPathComponent(fileId)
         try? data.write(to: url)
+        
+        // 异步清理旧缓存
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.cleanupOldCacheFiles()
+        }
+        
         return fileId
+    }
+    
+    /// 清理旧缓存文件：限制总大小和文件数量
+    private func cleanupOldCacheFiles() {
+        let dir = filesCacheDir()
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey], options: []) else { return }
+        
+        // 按修改时间排序（最旧的在前）
+        let sortedFiles = files.compactMap { url -> (URL, Date, UInt64)? in
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  let modDate = attrs[.modificationDate] as? Date,
+                  let fileSize = attrs[.size] as? UInt64 else { return nil }
+            return (url, modDate, fileSize)
+        }.sorted { $0.1 < $1.1 }
+        
+        var totalSize: UInt64 = sortedFiles.reduce(0) { $0 + $1.2 }
+        var fileCount = sortedFiles.count
+        
+        // 如果超过限制，删除最旧的文件
+        for (url, _, size) in sortedFiles {
+            if totalSize <= maxCacheSize && fileCount <= maxCacheFiles { break }
+            try? FileManager.default.removeItem(at: url)
+            totalSize -= size
+            fileCount -= 1
+        }
     }
     
     private func formatFileSize(_ bytes: Int) -> String {
