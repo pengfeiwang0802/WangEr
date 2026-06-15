@@ -3,7 +3,13 @@ import AppKit
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     
-    static let appVersion = "v0.2.7"
+    /// 从 Info.plist 读取版本号，单点维护
+    static var appVersion: String {
+        if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            return "v\(version)"
+        }
+        return "v?.?.?"
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let viewController = ChatViewController()
