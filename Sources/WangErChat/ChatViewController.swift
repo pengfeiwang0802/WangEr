@@ -1333,6 +1333,31 @@ AppLogger.shared.log("[DEBUG] availableModels: \(availableModels)")
 
 // MARK: - Streaming SSE (OpenResponses)
 extension ChatViewController: URLSessionDataDelegate {
+    // MARK: - HTTP 响应检查
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            completionHandler(.allow)
+            return
+        }
+        
+        if httpResponse.statusCode != 200 {
+            AppLogger.shared.log("[HTTP Error] 状态码: \(httpResponse.statusCode)")
+            // 不阻止接收，但标记错误状态，后续 didReceive data 中会检查
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                // 显示错误状态
+                self.setStatusForce("❌ HTTP \(httpResponse.statusCode)", priority: .ready)
+                self.hideStepIndicator()
+                
+                // 在聊天区显示错误
+                let errorMsg = "⚠️ Gateway 返回 HTTP \(httpResponse.statusCode)\n模型可能未在 Gateway 中注册，或 API Key 无效。"
+                self.js("addMessage('assistant','\(self.escJS(errorMsg))')")
+            }
+        }
+        
+        completionHandler(.allow)
+    }
+    
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         guard !data.isEmpty else { return }
         guard let chunk = String(data: data, encoding: .utf8) else {
