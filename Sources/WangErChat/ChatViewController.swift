@@ -2,35 +2,6 @@ import AppKit
 import WebKit
 import UniformTypeIdentifiers
 
-// MARK: - 数据模型
-struct Conversation: Codable {
-    var id = UUID()
-    var title: String
-    var messages: [[String: String]] = []
-    var createdAt = Date()
-}
-
-struct AgentInfo: Codable {
-    let id: String
-    let identityName: String?
-    let identityEmoji: String?
-    let model: String?
-    let workspace: String?
-    let isDefault: Bool?
-    
-    var displayName: String {
-        let emoji = identityEmoji ?? "🤖"
-        let name = identityName ?? id
-        return "\(emoji) \(name)"
-    }
-}
-
-extension Array {
-    subscript(safe index: Int) -> Element? {
-        indices.contains(index) ? self[index] : nil
-    }
-}
-
 class ChatViewController: NSViewController {
     // === UI 组件 ===
     private let splitView = NSSplitView()
@@ -89,12 +60,7 @@ class ChatViewController: NSViewController {
     private let modelMenu = NSMenu()
     
     // 可用模型列表（从 openclaw.json 读取）
-    private struct ModelOption {
-        let displayName: String
-        let apiModelId: String  // 格式: providerName/modelId
-    }
-    
-    private var availableModels: [ModelOption] = []
+    private var availableModels: [Models.ModelOption] = []
     
     // === 状态 ===
     private var conversations: [Conversation] = []
@@ -644,9 +610,7 @@ class ChatViewController: NSViewController {
         tokenLabel.stringValue = "⚡ \(formatNumber(totalPromptTokens)) + \(formatNumber(totalCompletionTokens)) = \(formatNumber(total)) tok"
     }
     
-    private func formatNumber(_ n: Int) -> String {
-        return n >= 1000 ? String(format: "%.1fK", Double(n)/1000) : "\(n)"
-    }
+
     
     private func loadAgents() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -860,7 +824,7 @@ AppLogger.shared.log("[Balance] Kimi JSON 解析错误: \(error)")
         
         guard FileManager.default.fileExists(atPath: path) else {
 AppLogger.shared.log("[loadAvailableModels] openclaw.json 不存在，使用默认模型")
-            availableModels = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
+            availableModels = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
             return
         }
         
@@ -870,11 +834,11 @@ AppLogger.shared.log("[loadAvailableModels] openclaw.json 不存在，使用默�
                   let models = json["models"] as? [String: Any],
                   let providers = models["providers"] as? [String: Any] else {
 AppLogger.shared.log("[loadAvailableModels] 解析 openclaw.json 结构失败")
-                availableModels = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
+                availableModels = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
                 return
             }
             
-            var result: [ModelOption] = []
+            var result: [Models.ModelOption] = []
             for (providerName, providerConfig) in providers {
                 guard let config = providerConfig as? [String: Any] else { continue }
                 // 只显示配置了 API Key 的 provider 的模型
@@ -883,13 +847,13 @@ AppLogger.shared.log("[loadAvailableModels] 解析 openclaw.json 结构失败")
                 for model in modelList {
                     guard let modelId = model["id"] as? String else { continue }
                     let displayName = model["name"] as? String ?? modelId
-                    result.append(ModelOption(displayName: displayName, apiModelId: "\(providerName)/\(modelId)"))
+                    result.append(Models.ModelOption(displayName: displayName, apiModelId: "\(providerName)/\(modelId)"))
                 }
             }
             
             if result.isEmpty {
                 // 兜底
-                result = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
+                result = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
             }
             
             availableModels = result
@@ -899,7 +863,7 @@ AppLogger.shared.log("[loadAvailableModels] 解析 openclaw.json 结构失败")
             }
         } catch {
 AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error)")
-            availableModels = [ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
+            availableModels = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
             DispatchQueue.main.async { [weak self] in
                 self?.statusLabel.stringValue = "⚠️ 模型配置读取失败"
             }
@@ -1205,13 +1169,8 @@ extension ChatViewController: NSTextViewDelegate {
         }
     }
     
-    private func sendStreamToGateway(_ text: String) {
-        // 前置校验
-        guard !text.isEmpty else {
-            statusLabel.stringValue = "⚠️ 消息不能为空"
-            return
-        }
-        
+    /// 启动流式请求的公共方法（提取三个 sendXxxToGateway 中的重复逻辑）
+    private func startStreamingRequest(body: [String: Any], statusText: String, statusIcon: String) {
         guard !AppConfig.gatewayToken.isEmpty else {
             js("addMessage('assistant','❌ Gateway Token 未配置，请检查 openclaw.json')")
             statusLabel.stringValue = "⚠️ Token 未配置"
@@ -1227,9 +1186,8 @@ extension ChatViewController: NSTextViewDelegate {
         isGenerating = true
         isFinalizing = false
         sendButton.isHidden = true; stopButton.isHidden = false
-        // 方案1&3: 使用增强状态系统
-        setStatusAdvanced("🚀 正在启动请求...", priority: .generating, color: .systemBlue, alpha: 0.30)
-        showStepIndicator(icon: "🚀", text: "正在启动请求...", progress: 10)
+        setStatusAdvanced(statusText, priority: .generating, color: .systemBlue, alpha: 0.30)
+        showStepIndicator(icon: statusIcon, text: statusText, progress: 10)
         js("at()")
         resetSafetyTimer()
         sseBuffer = ""
@@ -1239,7 +1197,38 @@ extension ChatViewController: NSTextViewDelegate {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(AppConfig.gatewayToken)", forHTTPHeaderField: "Authorization")
         req.setValue(currentAgentId, forHTTPHeaderField: "x-openclaw-agent-id")
-        // Build conversation history as OpenResponses format
+        
+        let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
+AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedModel)")
+        req.setValue(mappedModel, forHTTPHeaderField: "x-openclaw-model")
+        
+        do {
+            req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        } catch {
+            DispatchQueue.main.async {
+                self.js("addMessage('assistant','❌ 请求构造失败')")
+                self.stopGenerating()
+            }
+            return
+        }
+        
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 1860
+        config.timeoutIntervalForResource = 3600
+        
+        currentURLSession?.invalidateAndCancel()
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+        currentURLSession = session
+        let task = session.dataTask(with: req)
+        currentStreamTask = task; task.resume()
+    }
+    
+    private func sendStreamToGateway(_ text: String) {
+        guard !text.isEmpty else {
+            statusLabel.stringValue = "⚠️ 消息不能为空"
+            return
+        }
+        
         let recentMessages = Array(currentMessages.suffix(20))
         let inputItems: [[String: Any]] = recentMessages.map { msg in
             let role = msg["role"] ?? "user"
@@ -1250,36 +1239,20 @@ extension ChatViewController: NSTextViewDelegate {
                 "content": [["type": "input_text", "text": content]]
             ]
         }
-        // 找到当前选中模型的 API ID
+        
         let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
-AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedModel)")
-AppLogger.shared.log("[DEBUG] availableModels: \(availableModels)")
-        req.setValue(mappedModel, forHTTPHeaderField: "x-openclaw-model")
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
-        do {
-            req.httpBody = try JSONSerialization.data(withJSONObject: [
+        
+        startStreamingRequest(
+            body: [
                 "model": "openclaw",
                 "input": inputItems,
                 "max_output_tokens": 16384, "temperature": temperature,
                 "stream": true
-            ] as [String : Any])
-        } catch {
-            DispatchQueue.main.async {
-                self.js("addMessage('assistant','❌ 请求构造失败: \(self.escJS(error.localizedDescription))')")
-                self.stopGenerating()
-            }
-            return
-        }
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 1860  // 比 safety timer 稍长
-        config.timeoutIntervalForResource = 3600 // 60分钟总超时
-        
-        // 复用 URLSession，避免内存泄漏
-        currentURLSession?.invalidateAndCancel()
-        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-        currentURLSession = session
-        let task = session.dataTask(with: req)
-        currentStreamTask = task; task.resume()
+            ] as [String: Any],
+            statusText: "🚀 正在启动请求...",
+            statusIcon: "🚀"
+        )
     }
     
     private func stopGenerating() {
@@ -1428,49 +1401,7 @@ AppLogger.shared.log("[SSE Error] 无法将数据解码为 UTF-8")
         statusBar.layer?.backgroundColor = nil
     }
     
-    /// 工具名称转友好显示
-    private func friendlyToolName(_ name: String) -> String {
-        let map: [String: String] = [
-            "web_search": "搜索网页",
-            "web_fetch": "读取网页",
-            "exec": "执行命令",
-            "read": "读取文件",
-            "write": "写入文件",
-            "edit": "编辑文件",
-            "apply_patch": "应用补丁",
-            "image": "分析图片",
-            "memory_search": "搜索记忆",
-            "memory_get": "读取记忆",
-            "browser_navigate": "打开网页",
-            "browser_snapshot": "查看页面",
-            "browser_click": "点击页面",
-            "browser_type": "输入文字",
-            "cron": "设置提醒",
-            "skill_workshop": "技能工坊",
-            "sessions_spawn": "创建子任务",
-            "sessions_send": "发送消息",
-        ]
-        return map[name] ?? name.replacingOccurrences(of: "_", with: " ").capitalized
-    }
-    
-    /// 工具参数摘要（截取关键参数）
-    private func toolArgsSummary(_ args: [String: Any]?) -> String {
-        guard let args = args, !args.isEmpty else { return "" }
-        // 优先显示关键字段
-        let priorities = ["query", "url", "path", "name", "message", "command", "question", "text"]
-        for key in priorities {
-            if let val = args[key] as? String {
-                let truncated = val.count > 60 ? String(val.prefix(60)) + "…" : val
-                return truncated
-            }
-        }
-        // 没有关键字段，显示第一个参数名
-        if let firstKey = args.keys.first, let val = args[firstKey] as? String {
-            let truncated = val.count > 40 ? String(val.prefix(40)) + "…" : val
-            return truncated
-        }
-        return ""
-    }
+
     
     /// 线程安全的 activeToolStack 操作
     private func pushTool(_ name: String) {
@@ -1532,8 +1463,8 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200)
                 if let item = j["item"] as? [String: Any], item["type"] as? String == "function_call" {
                     let name = item["name"] as? String ?? ""
                     let args = item["arguments"] as? [String: Any]
-                    let friendlyName = self.friendlyToolName(name)
-                    let summary = self.toolArgsSummary(args)
+                    let friendlyName = friendlyToolName(name)
+                    let summary = toolArgsSummary(args)
                     self.pushTool(name)
                     
                     let statusText: String
@@ -1566,7 +1497,7 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200)
                 
             case "response.function_call_arguments.done":
                 if let name = j["name"] as? String {
-                    let friendlyName = self.friendlyToolName(name)
+                    let friendlyName = friendlyToolName(name)
                     self.setStatusAdvanced("✅ 参数就绪: \(friendlyName)", priority: .toolCall, color: .systemOrange, alpha: 0.35)
                 }
                 
@@ -1582,7 +1513,7 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200)
                     self.js("apd('\(self.escJS(content))')")
                     self.streamCharCount += content.count
                     let liveTotal = self.totalPromptTokens + self.totalCompletionTokens + self.streamCharCount / 3
-                    self.tokenLabel.stringValue = "⚡ \(self.formatNumber(self.totalPromptTokens)) + \(self.formatNumber(self.totalCompletionTokens + self.streamCharCount / 3)) = \(self.formatNumber(liveTotal)) tok"
+                    self.tokenLabel.stringValue = "⚡ \(formatNumber(self.totalPromptTokens)) + \(formatNumber(self.totalCompletionTokens + self.streamCharCount / 3)) = \(formatNumber(liveTotal)) tok"
                     self.setStatusAdvanced("📝 生成回复...", priority: .generating, color: .systemGreen, alpha: 0.40)
                     self.showStepIndicator(icon: "📝", text: "正在生成回复...", progress: 75)
                     self.stopStatusIconAnimation()
@@ -1598,7 +1529,7 @@ AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
                 if let part = j["part"] as? [String: Any] {
                     if part["type"] as? String == "function_call" {
                         let name = part["name"] as? String ?? ""
-                        let friendlyName = self.friendlyToolName(name)
+                        let friendlyName = friendlyToolName(name)
                         self.setStatusAdvanced("✅ 工具完成: \(friendlyName)", priority: .toolCall, color: .systemOrange, alpha: 0.30)
                         self.showStepIndicator(icon: "✅", text: "工具执行完成: \(friendlyName)", progress: 65)
                     } else {
@@ -1610,7 +1541,7 @@ AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
                 if let item = j["item"] as? [String: Any] {
                     if item["type"] as? String == "function_call" {
                         let name = item["name"] as? String ?? ""
-                        let friendlyName = self.friendlyToolName(name)
+                        let friendlyName = friendlyToolName(name)
                         self.popTool()
                         let remaining = self.activeToolStack.count
                         if remaining > 0 {
@@ -1763,36 +1694,13 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
     }
     
     private func sendImageToGateway(imageData: String, filename: String, text: String) {
-        isGenerating = true
-        isFinalizing = false
-        sendButton.isHidden = true; stopButton.isHidden = false
-        // 方案1&3: 使用增强状态系统
-        setStatusAdvanced("🖼️ 发送图片: \(filename)", priority: .generating, color: .systemBlue, alpha: 0.30)
-        showStepIndicator(icon: "🖼️", text: "发送图片...", progress: 10)
-        js("at()")
-        resetSafetyTimer()
-        sseBuffer = ""
-        
-        var req = URLRequest(url: URL(string: "\(AppConfig.gatewayURL)/v1/responses")!)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("Bearer \(AppConfig.gatewayToken)", forHTTPHeaderField: "Authorization")
-        req.setValue(currentAgentId, forHTTPHeaderField: "x-openclaw-agent-id")
-        
-        let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
-        req.setValue(mappedModel, forHTTPHeaderField: "x-openclaw-model")
-        
         // 构建带图片的消息
         var contentParts: [[String: Any]] = []
-        
-        // 图片内容
         contentParts.append([
             "type": "input_image",
             "image_url": imageData,
             "detail": "high"
         ])
-        
-        // 如果有文字，加文字
         if !text.isEmpty {
             contentParts.append([
                 "type": "input_text",
@@ -1808,63 +1716,29 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
             ]
         ]
         
+        let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
-        do {
-            req.httpBody = try JSONSerialization.data(withJSONObject: [
+        
+        startStreamingRequest(
+            body: [
                 "model": "openclaw",
                 "input": inputItems,
                 "max_output_tokens": 16384, "temperature": temperature,
                 "stream": true
-            ] as [String : Any])
-        } catch {
-            DispatchQueue.main.async {
-                self.js("addMessage('assistant','❌ 图片请求构造失败')")
-                self.stopGenerating()
-            }
-            return
-        }
-        
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 1860
-        config.timeoutIntervalForResource = 3600
-        
-        // 复用 URLSession
-        currentURLSession?.invalidateAndCancel()
-        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-        currentURLSession = session
-        let task = session.dataTask(with: req)
-        currentStreamTask = task; task.resume()
+            ] as [String: Any],
+            statusText: "🖼️ 发送图片: \(filename)",
+            statusIcon: "🖼️"
+        )
     }
     
     private func sendFileToGateway(fileData: String, filename: String, mimeType: String, text: String) {
-        isGenerating = true
-        isFinalizing = false
-        sendButton.isHidden = true; stopButton.isHidden = false
-        // 方案1&3: 使用增强状态系统
-        setStatusAdvanced("📎 发送文件: \(filename)", priority: .generating, color: .systemBlue, alpha: 0.30)
-        showStepIndicator(icon: "📎", text: "发送文件...", progress: 10)
-        js("at()")
-        resetSafetyTimer()
-        sseBuffer = ""
-        
-        var req = URLRequest(url: URL(string: "\(AppConfig.gatewayURL)/v1/responses")!)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("Bearer \(AppConfig.gatewayToken)", forHTTPHeaderField: "Authorization")
-        req.setValue(currentAgentId, forHTTPHeaderField: "x-openclaw-agent-id")
-        
-        let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
-        req.setValue(mappedModel, forHTTPHeaderField: "x-openclaw-model")
-        
         // 构建文件消息
         var contentParts: [[String: Any]] = []
-        
         contentParts.append([
             "type": "input_file",
             "file_data": fileData,
             "filename": filename
         ])
-        
         if !text.isEmpty {
             contentParts.append([
                 "type": "input_text",
@@ -1880,32 +1754,19 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
             ]
         ]
         
+        let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
-        do {
-            req.httpBody = try JSONSerialization.data(withJSONObject: [
+        
+        startStreamingRequest(
+            body: [
                 "model": "openclaw",
                 "input": inputItems,
                 "max_output_tokens": 16384, "temperature": temperature,
                 "stream": true
-            ] as [String : Any])
-        } catch {
-            DispatchQueue.main.async {
-                self.js("addMessage('assistant','❌ 文件请求构造失败')")
-                self.stopGenerating()
-            }
-            return
-        }
-        
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 1860
-        config.timeoutIntervalForResource = 3600
-        
-        // 复用 URLSession
-        currentURLSession?.invalidateAndCancel()
-        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-        currentURLSession = session
-        let task = session.dataTask(with: req)
-        currentStreamTask = task; task.resume()
+            ] as [String: Any],
+            statusText: "📎 发送文件: \(filename)",
+            statusIcon: "📎"
+        )
     }
     
     private func switchToConversation(_ index: Int) {
@@ -1946,7 +1807,7 @@ AppLogger.shared.log("[Warning] Message \(msgIndex) has empty content, skipping"
                     // 恢复图片消息：从缓存读文件，生成 data URL 渲染
                     let fileURL = self.cachedFileURL(fileId: fileId)
                     if let imageData = try? Data(contentsOf: fileURL) {
-                        let mimeType = self.mimeTypeForFile(fileId)
+                        let mimeType = mimeTypeForFile(fileId)
                         let dataUrl = "data:\(mimeType);base64,\(imageData.base64EncodedString())"
                         self.js("addImageMessage('\(self.escJS(role))','\(dataUrl)','\(self.escJS(content))')")
                     } else {
@@ -1956,8 +1817,8 @@ AppLogger.shared.log("[Warning] Message \(msgIndex) has empty content, skipping"
                     // 恢复文件消息：渲染文件卡片
                     let fileURL = self.cachedFileURL(fileId: fileId)
                     let fileSize = Int(msg["fileSize"] ?? "0") ?? 0
-                    let fileSizeStr = self.formatFileSize(fileSize)
-                    let ext = self.fileExtension(fileId)
+                    let fileSizeStr = formatFileSize(fileSize)
+                    let ext = fileExtension(fileId)
                     if FileManager.default.fileExists(atPath: fileURL.path) {
                         self.js("addFileCard('\(self.escJS(role))','\(self.escJS(content))','\(fileSizeStr)','\(fileId)','\(ext)')")
                     } else {
@@ -1984,44 +1845,6 @@ extension ChatViewController: NSTextFieldDelegate {
         }
         tf.isEditable = false
         conversationTableView.reloadData()
-    }
-}
-
-// MARK: - 拖放目标视图
-class DropTargetView: NSView {
-    var onDragEnter: (() -> Void)?
-    var onDragExit: (() -> Void)?
-    var onFileDrop: ((URL) -> Void)?
-    
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        registerForDraggedTypes([.fileURL])
-    }
-    
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        registerForDraggedTypes([.fileURL])
-    }
-    
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: nil) {
-            onDragEnter?()
-            return .copy
-        }
-        return []
-    }
-    
-    override func draggingExited(_ sender: NSDraggingInfo?) {
-        onDragExit?()
-    }
-    
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
-              let url = urls.first else {
-            return false
-        }
-        onFileDrop?(url)
-        return true
     }
 }
 
@@ -2152,26 +1975,7 @@ AppLogger.shared.log("[File Open] 文件不存在: \(fileId)")
         }
     }
     
-    private func formatFileSize(_ bytes: Int) -> String {
-        if bytes < 1024 { return "\(bytes) B" }
-        if bytes < 1024*1024 { return String(format: "%.1f KB", Double(bytes)/1024.0) }
-        if bytes < 1024*1024*1024 { return String(format: "%.1f MB", Double(bytes)/(1024.0*1024.0)) }
-        return String(format: "%.1f GB", Double(bytes)/(1024.0*1024.0*1024.0))
-    }
-    
-    private func fileExtension(_ filename: String) -> String {
-        return (filename as NSString).pathExtension.lowercased()
-    }
-    
-    private func mimeTypeForFile(_ filename: String) -> String {
-        let ext = fileExtension(filename)
-        let mimeMap: [String: String] = [
-            "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-            "gif": "image/gif", "webp": "image/webp", "heic": "image/heic",
-            "svg": "image/svg+xml", "bmp": "image/bmp"
-        ]
-        return mimeMap[ext] ?? "application/octet-stream"
-    }
+
 }
 
 // MARK: - NSTableView
