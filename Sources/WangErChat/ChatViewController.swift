@@ -7,11 +7,11 @@ class ChatViewController: NSViewController {
     private let splitView = NSSplitView()
     private let sidebarView = NSView()
     private let chatContainer = NSView()
-    
+
     private let toolbarView = NSView()
     private let modelButton = NSButton()
     private let settingsButton = NSButton()
-    
+
     // 边栏
     private let conversationLabel = NSTextField()
     private let newChatButton = NSButton()
@@ -22,7 +22,7 @@ class ChatViewController: NSViewController {
     private let agentsTableView = NSTableView()
     private let agentsScrollView = NSScrollView()
     private let sidebarDivider = NSBox()
-    
+
     // Agent 参数面板
     private let agentPanelView = NSView()
     private let agentPanelLabel = NSTextField()
@@ -30,7 +30,7 @@ class ChatViewController: NSViewController {
     private let agentPanelModel = NSTextField()
     private let agentPanelID = NSTextField()
     private let agentPanelDivider = NSBox()
-    
+
     // 聊天区
     private let webView: WKWebView = {
         let config = WKWebViewConfiguration()
@@ -39,7 +39,7 @@ class ChatViewController: NSViewController {
         return WKWebView(frame: .zero, configuration: config)
     }()
     private let textView = SendTextView()
-    
+
     // 文件拖拽
     private let dropTargetView = DropTargetView()
     private let dropIndicator = NSView()
@@ -47,7 +47,7 @@ class ChatViewController: NSViewController {
     private let textScrollView = NSScrollView()
     private let sendButton = NSButton()
     private let stopButton = NSButton()
-    
+
     // 底部状态栏
     private let statusBar = NSView()
     private let modelLabel = NSTextField()
@@ -55,34 +55,34 @@ class ChatViewController: NSViewController {
     let statusLabel = NSTextField()
     private let tokenLabel = NSTextField()
     private let balanceLabel = NSTextField()
-    
+
     // 模型选择
     private let modelMenu = NSMenu()
-    
-    // 可用模型列表（从 openclaw.json 读取）
+
+    // 可用模型列表(从 openclaw.json 读取)
     private var availableModels: [Models.ModelOption] = []
-    
+
     // === 状态 ===
     private var conversations: [Conversation] = []
     private var currentConversationIndex = 0
     private var isGenerating = false
-    private var isFinalizing = false // 幂等锁：防止 finalize 被多次调用
+    private var isFinalizing = false // 幂等锁:防止 finalize 被多次调用
     private var currentStreamTask: URLSessionDataTask?
     private var currentURLSession: URLSession?  // 用于复用和清理
     private var safetyTimer: Timer?
     private var totalPromptTokens = 0
     private var totalCompletionTokens = 0
     private var streamCharCount = 0
-    private var jsErrorCount = 0  // JS 连续异常计数，超阈值触发 WebView 重新加载
-    
-    // SSE 累积缓冲区：防止 TCP 分片截断事件
+    private var jsErrorCount = 0  // JS 连续异常计数,超阈值触发 WebView 重新加载
+
+    // SSE 累积缓冲区:防止 TCP 分片截断事件
     private var sseBuffer = ""
-    
-    /// 当前活跃的工具调用链（用于显示嵌套工具调用）
+
+    /// 当前活跃的工具调用链(用于显示嵌套工具调用)
     private var activeToolStack: [String] = []
-    
+
     // MARK: - 方案1&3: 增强状态管理
-    /// 状态优先级（数字越大优先级越高）
+    /// 状态优先级(数字越大优先级越高)
     private enum StatusPriority: Int {
         case ready = 0
         case generating = 1
@@ -90,16 +90,16 @@ class ChatViewController: NSViewController {
         case toolCall = 3
         case reasoning = 4
     }
-    
-    /// 当前状态优先级（用于延迟覆盖逻辑）
+
+    /// 当前状态优先级(用于延迟覆盖逻辑)
     private var currentStatusPriority: StatusPriority = .ready
-    /// 当前状态开始时间（用于延迟覆盖）
+    /// 当前状态开始时间(用于延迟覆盖)
     private var currentStatusStartTime: Date = Date()
-    /// 状态最小保持时间（秒）
+    /// 状态最小保持时间(秒)
     private let minStatusHoldTime: TimeInterval = 1.5
     /// 待处理的状态更新队列
     private var pendingStatusUpdate: (text: String, priority: StatusPriority, color: NSColor, alpha: CGFloat)?
-    
+
     /// 状态图标动画定时器
     private var statusIconTimer: Timer?
     /// 当前状态图标索引
@@ -108,7 +108,7 @@ class ChatViewController: NSViewController {
     private let thinkingIcons = ["🤔", "🧠", "💭", "🤔", "🧠", "💭"]
     /// 工具调用图标序列
     private let toolIcons = ["🔧", "⚙️", "🔨", "🔧", "⚙️", "🔨"]
-    
+
     // MARK: - 方案2: 步骤指示器
     /// 步骤指示器容器
     private let stepIndicatorView = NSView()
@@ -120,28 +120,25 @@ class ChatViewController: NSViewController {
     private let stepProgressBar = NSProgressIndicator()
     /// 步骤指示器是否可见
     private var isStepIndicatorVisible = false
-    
-    // 文件缓存清理：最大 100MB，最多 100 个文件
-    private let maxCacheSize: UInt64 = 100 * 1024 * 1024
-    private let maxCacheFiles = 100
-    
+
+    // 文件缓存清理:最大 100MB,最多 100 个文件
     private var currentModel = "DeepSeek V4 Flash"
     private var dsBalance: String = "--"
     private var moonshotBalance: String = "--"
     private var agents: [AgentInfo] = []
     private var currentAgentId = "main"
-    
+
     private var currentMessages: [[String: String]] {
         get { conversations[safe: currentConversationIndex]?.messages ?? [] }
         set { if conversations.indices.contains(currentConversationIndex) { conversations[currentConversationIndex].messages = newValue; saveConversations() } }
     }
-    
+
     private let savePath = "\(NSHomeDirectory())/.openclaw/workspace/WangErChat/conversations.json"
-    
+
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 860, height: 660))
     }
-    
+
     override func viewDidLoad() {
         super.viewDidLoad()
         setupSplitView()
@@ -154,7 +151,7 @@ class ChatViewController: NSViewController {
         setupFileDragDrop()
         setupDropIndicator()
         setupStepIndicator()
-        // 加载持久化的会话，没有则创建默认
+        // 加载持久化的会话,没有则创建默认
         loadConversations()
         if conversations.isEmpty {
             conversations = [Conversation(title: "💬 新对话 1")]
@@ -173,7 +170,7 @@ class ChatViewController: NSViewController {
         }
         loadAgents()
     }
-    
+
     // MARK: - 主布局
     private func setupSplitView() {
         splitView.isVertical = true; splitView.dividerStyle = .thin
@@ -191,23 +188,23 @@ class ChatViewController: NSViewController {
             sidebarView.widthAnchor.constraint(equalToConstant: 220),
         ])
     }
-    
+
     // MARK: - 左侧边栏
     private func setupSidebar() {
         sidebarView.wantsLayer = true
         sidebarView.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        
+
         conversationLabel.translatesAutoresizingMaskIntoConstraints = false
         conversationLabel.stringValue = "💬 会话"
         conversationLabel.font = NSFont.boldSystemFont(ofSize: 13)
         conversationLabel.isEditable = false; conversationLabel.isBordered = false; conversationLabel.backgroundColor = .clear
         sidebarView.addSubview(conversationLabel)
-        
+
         newChatButton.translatesAutoresizingMaskIntoConstraints = false
-        newChatButton.title = "＋"; newChatButton.bezelStyle = .smallSquare
+        newChatButton.title = "+"; newChatButton.bezelStyle = .smallSquare
         newChatButton.action = #selector(newConversation); newChatButton.target = self
         sidebarView.addSubview(newChatButton)
-        
+
         let convCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("conversation"))
         convCol.width = 200
         conversationTableView.addTableColumn(convCol)
@@ -219,22 +216,22 @@ class ChatViewController: NSViewController {
         conversationScrollView.autohidesScrollers = true
         conversationScrollView.translatesAutoresizingMaskIntoConstraints = false
         sidebarView.addSubview(conversationScrollView)
-        
+
         sidebarDivider.translatesAutoresizingMaskIntoConstraints = false
         sidebarDivider.boxType = .separator
         sidebarView.addSubview(sidebarDivider)
-        
+
         agentsLabel.translatesAutoresizingMaskIntoConstraints = false
         agentsLabel.stringValue = "🤖 Agents"
         agentsLabel.font = NSFont.boldSystemFont(ofSize: 13)
         agentsLabel.isEditable = false; agentsLabel.isBordered = false; agentsLabel.backgroundColor = .clear
         sidebarView.addSubview(agentsLabel)
-        
+
         addAgentButton.translatesAutoresizingMaskIntoConstraints = false
-        addAgentButton.title = "＋"; addAgentButton.bezelStyle = .smallSquare
+        addAgentButton.title = "+"; addAgentButton.bezelStyle = .smallSquare
         addAgentButton.action = #selector(addAgent); addAgentButton.target = self
         sidebarView.addSubview(addAgentButton)
-        
+
         let agentCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("agent"))
         agentCol.width = 200
         agentsTableView.addTableColumn(agentCol)
@@ -246,7 +243,7 @@ class ChatViewController: NSViewController {
         agentsScrollView.autohidesScrollers = true
         agentsScrollView.translatesAutoresizingMaskIntoConstraints = false
         sidebarView.addSubview(agentsScrollView)
-        
+
         NSLayoutConstraint.activate([
             conversationLabel.topAnchor.constraint(equalTo: sidebarView.topAnchor, constant: 12),
             conversationLabel.leadingAnchor.constraint(equalTo: sidebarView.leadingAnchor, constant: 12),
@@ -272,31 +269,31 @@ class ChatViewController: NSViewController {
             agentsScrollView.trailingAnchor.constraint(equalTo: sidebarView.trailingAnchor),
             agentsScrollView.bottomAnchor.constraint(equalTo: sidebarView.bottomAnchor),
         ])
-        
+
         conversationTableView.dataSource = self; conversationTableView.delegate = self
         conversationTableView.doubleAction = #selector(doubleClickConversation)
         agentsTableView.dataSource = self; agentsTableView.delegate = self
         setupAgentPanel()
     }
-    
+
     // MARK: - 顶部工具栏
     private func setupToolbar() {
         toolbarView.translatesAutoresizingMaskIntoConstraints = false
         toolbarView.wantsLayer = true
         toolbarView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         chatContainer.addSubview(toolbarView)
-        
+
         modelButton.translatesAutoresizingMaskIntoConstraints = false
         modelButton.title = "🧠 \(currentModel) ▾"
         modelButton.bezelStyle = .rounded
         modelButton.action = #selector(showModelMenu); modelButton.target = self
         toolbarView.addSubview(modelButton)
-        
+
         settingsButton.translatesAutoresizingMaskIntoConstraints = false
         settingsButton.title = "⚙️"; settingsButton.bezelStyle = .rounded
         settingsButton.action = #selector(showSettings); settingsButton.target = self
         toolbarView.addSubview(settingsButton)
-        
+
         NSLayoutConstraint.activate([
             toolbarView.topAnchor.constraint(equalTo: chatContainer.topAnchor),
             toolbarView.leadingAnchor.constraint(equalTo: chatContainer.leadingAnchor),
@@ -310,7 +307,7 @@ class ChatViewController: NSViewController {
             settingsButton.heightAnchor.constraint(equalToConstant: 26),
         ])
     }
-    
+
     // MARK: - 方案2: 步骤指示器
     private func setupStepIndicator() {
         stepIndicatorView.translatesAutoresizingMaskIntoConstraints = false
@@ -319,7 +316,7 @@ class ChatViewController: NSViewController {
         stepIndicatorView.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         stepIndicatorView.isHidden = true
         chatContainer.addSubview(stepIndicatorView, positioned: .above, relativeTo: webView)
-        
+
         stepIconLabel.translatesAutoresizingMaskIntoConstraints = false
         stepIconLabel.stringValue = "🤔"
         stepIconLabel.font = NSFont.systemFont(ofSize: 14)
@@ -327,7 +324,7 @@ class ChatViewController: NSViewController {
         stepIconLabel.isBordered = false
         stepIconLabel.backgroundColor = .clear
         stepIndicatorView.addSubview(stepIconLabel)
-        
+
         stepTextLabel.translatesAutoresizingMaskIntoConstraints = false
         stepTextLabel.stringValue = ""
         stepTextLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
@@ -336,7 +333,7 @@ class ChatViewController: NSViewController {
         stepTextLabel.isBordered = false
         stepTextLabel.backgroundColor = .clear
         stepIndicatorView.addSubview(stepTextLabel)
-        
+
         stepProgressBar.translatesAutoresizingMaskIntoConstraints = false
         stepProgressBar.style = .bar
         stepProgressBar.isIndeterminate = false
@@ -346,35 +343,35 @@ class ChatViewController: NSViewController {
         stepProgressBar.controlSize = .small
         stepProgressBar.isHidden = false
         stepIndicatorView.addSubview(stepProgressBar)
-        
+
         NSLayoutConstraint.activate([
             stepIndicatorView.topAnchor.constraint(equalTo: toolbarView.bottomAnchor, constant: 2),
             stepIndicatorView.leadingAnchor.constraint(equalTo: chatContainer.leadingAnchor, constant: 8),
             stepIndicatorView.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -8),
             stepIndicatorView.heightAnchor.constraint(equalToConstant: 28),
-            
+
             stepIconLabel.leadingAnchor.constraint(equalTo: stepIndicatorView.leadingAnchor, constant: 8),
             stepIconLabel.centerYAnchor.constraint(equalTo: stepIndicatorView.centerYAnchor),
             stepIconLabel.widthAnchor.constraint(equalToConstant: 20),
-            
+
             stepTextLabel.leadingAnchor.constraint(equalTo: stepIconLabel.trailingAnchor, constant: 4),
             stepTextLabel.centerYAnchor.constraint(equalTo: stepIndicatorView.centerYAnchor),
             stepTextLabel.trailingAnchor.constraint(lessThanOrEqualTo: stepProgressBar.leadingAnchor, constant: -8),
-            
+
             stepProgressBar.trailingAnchor.constraint(equalTo: stepIndicatorView.trailingAnchor, constant: -8),
             stepProgressBar.centerYAnchor.constraint(equalTo: stepIndicatorView.centerYAnchor),
             stepProgressBar.widthAnchor.constraint(equalToConstant: 80),
             stepProgressBar.heightAnchor.constraint(equalToConstant: 8),
         ])
     }
-    
+
     /// 显示步骤指示器
     private func showStepIndicator(icon: String, text: String, progress: Double) {
         stepIconLabel.stringValue = icon
         stepTextLabel.stringValue = text
         stepProgressBar.doubleValue = min(progress, 100)
         stepProgressBar.isHidden = false
-        
+
         if !isStepIndicatorVisible {
             isStepIndicatorVisible = true
             stepIndicatorView.isHidden = false
@@ -385,7 +382,7 @@ class ChatViewController: NSViewController {
             }
         }
     }
-    
+
     /// 隐藏步骤指示器
     private func hideStepIndicator() {
         guard isStepIndicatorVisible else { return }
@@ -397,7 +394,7 @@ class ChatViewController: NSViewController {
             self?.stepIndicatorView.isHidden = true
         }
     }
-    
+
     // MARK: - 方案1&3: 增强状态管理方法
     /// 启动状态图标动画
     private func startStatusIconAnimation(icons: [String]) {
@@ -407,7 +404,7 @@ class ChatViewController: NSViewController {
             guard let self = self else { return }
             self.statusIconIndex = (self.statusIconIndex + 1) % icons.count
             let icon = icons[self.statusIconIndex]
-            // 更新状态标签中的图标（保留文字部分）
+            // 更新状态标签中的图标(保留文字部分)
             let currentText = self.statusLabel.stringValue
             if let range = currentText.range(of: " ") {
                 let textPart = currentText[range.upperBound...]
@@ -415,19 +412,19 @@ class ChatViewController: NSViewController {
             }
         }
     }
-    
+
     /// 停止状态图标动画
     private func stopStatusIconAnimation() {
         statusIconTimer?.invalidate()
         statusIconTimer = nil
     }
-    
-    /// 设置状态（带优先级和延迟覆盖）
+
+    /// 设置状态(带优先级和延迟覆盖)
     private func setStatusAdvanced(_ text: String, priority: StatusPriority, color: NSColor, alpha: CGFloat) {
         let now = Date()
         let elapsed = now.timeIntervalSince(currentStatusStartTime)
-        
-        // 如果新状态优先级 >= 当前状态优先级，或者当前状态已超过最小保持时间，则立即更新
+
+        // 如果新状态优先级 >= 当前状态优先级,或者当前状态已超过最小保持时间,则立即更新
         if priority.rawValue >= currentStatusPriority.rawValue || elapsed >= minStatusHoldTime {
             applyStatusUpdate(text: text, priority: priority, color: color, alpha: alpha)
             // 清除待处理更新
@@ -437,34 +434,34 @@ class ChatViewController: NSViewController {
             pendingStatusUpdate = (text: text, priority: priority, color: color, alpha: alpha)
         }
     }
-    
-    /// 强制立即更新状态（用于最终状态：就绪/错误）
+
+    /// 强制立即更新状态(用于最终状态:就绪/错误)
     private func setStatusForce(_ text: String, priority: StatusPriority = .ready, color: NSColor = .controlBackgroundColor, alpha: CGFloat = 0) {
         applyStatusUpdate(text: text, priority: priority, color: color, alpha: alpha)
         pendingStatusUpdate = nil
         stopStatusIconAnimation()
     }
-    
+
     /// 实际应用状态更新
     private func applyStatusUpdate(text: String, priority: StatusPriority, color: NSColor, alpha: CGFloat) {
         currentStatusPriority = priority
         currentStatusStartTime = Date()
-        
+
         // 更新状态栏
         statusLabel.stringValue = text
         statusLabel.needsDisplay = true
-        
+
         // 设置状态栏颜色
         if alpha > 0 {
             statusBar.layer?.backgroundColor = color.withAlphaComponent(alpha).cgColor
         } else {
             statusBar.layer?.backgroundColor = nil
         }
-        
+
         // 更新步骤指示器
         updateStepIndicator(for: priority, text: text)
     }
-    
+
     /// 根据优先级更新步骤指示器
     private func updateStepIndicator(for priority: StatusPriority, text: String) {
         switch priority {
@@ -480,7 +477,7 @@ class ChatViewController: NSViewController {
             showStepIndicator(icon: "🧠", text: "深度推理中...", progress: 40)
         }
     }
-    
+
     /// 检查并应用待处理状态更新
     private func flushPendingStatus() {
         guard let pending = pendingStatusUpdate else { return }
@@ -490,62 +487,62 @@ class ChatViewController: NSViewController {
             pendingStatusUpdate = nil
         }
     }
-    
+
     // MARK: - 聊天区
     private func setupChatArea() {
         webView.translatesAutoresizingMaskIntoConstraints = false
         webView.setValue(false, forKey: "drawsBackground")
         webView.uiDelegate = self
         chatContainer.addSubview(webView)
-        
+
         // NSTextView with Command+Enter handling
         textScrollView.translatesAutoresizingMaskIntoConstraints = false
         textScrollView.borderType = .bezelBorder
         textScrollView.hasVerticalScroller = true
-        
+
         textView.font = NSFont.systemFont(ofSize: 14)
         textView.isRichText = false
         textView.isEditable = true
         textView.drawsBackground = false
         textView.delegate = self
         textView.onCommandEnter = { [weak self] in self?.send() }
-        
+
         // Focus input on launch
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.textView.window?.makeFirstResponder(self?.textView)
         }
         textScrollView.documentView = textView
         chatContainer.addSubview(textScrollView)
-        
+
         sendButton.translatesAutoresizingMaskIntoConstraints = false
         sendButton.title = "发送"; sendButton.bezelStyle = .rounded
         sendButton.action = #selector(sendMessage); sendButton.target = self
         chatContainer.addSubview(sendButton)
-        
+
         stopButton.translatesAutoresizingMaskIntoConstraints = false
         stopButton.title = "⏹ 停止"; stopButton.bezelStyle = .rounded
         stopButton.action = #selector(stopGeneration); stopButton.target = self
         stopButton.isHidden = true
         chatContainer.addSubview(stopButton)
-        
+
         NSLayoutConstraint.activate([
             webView.topAnchor.constraint(equalTo: toolbarView.bottomAnchor, constant: 4),
             webView.leadingAnchor.constraint(equalTo: chatContainer.leadingAnchor, constant: 8),
             webView.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -8),
             webView.bottomAnchor.constraint(equalTo: textScrollView.topAnchor, constant: -8),
-            
+
             // Input area at bottom, full width
             textScrollView.leadingAnchor.constraint(equalTo: chatContainer.leadingAnchor, constant: 8),
             textScrollView.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -75),
             textScrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor, constant: -8),
             textScrollView.heightAnchor.constraint(equalToConstant: 60),
-            
+
             // Send button to the right of the input
             sendButton.leadingAnchor.constraint(equalTo: textScrollView.trailingAnchor, constant: 8),
             sendButton.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -8),
             sendButton.bottomAnchor.constraint(equalTo: textScrollView.bottomAnchor, constant: 0),
             sendButton.widthAnchor.constraint(equalToConstant: 60),
-            
+
             // Stop button same position
             stopButton.leadingAnchor.constraint(equalTo: textScrollView.trailingAnchor, constant: 8),
             stopButton.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -8),
@@ -553,42 +550,42 @@ class ChatViewController: NSViewController {
             stopButton.widthAnchor.constraint(equalToConstant: 60),
         ])
     }
-    
+
     // MARK: - 底部状态栏
     private func setupStatusBar() {
         statusBar.translatesAutoresizingMaskIntoConstraints = false
         statusBar.wantsLayer = true
         statusBar.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         chatContainer.addSubview(statusBar)
-        
+
         modelLabel.translatesAutoresizingMaskIntoConstraints = false
         modelLabel.stringValue = "🤖 \(currentModel)"
         modelLabel.font = NSFont.systemFont(ofSize: 11)
         modelLabel.textColor = .secondaryLabelColor
         modelLabel.isEditable = false; modelLabel.isBordered = false; modelLabel.backgroundColor = .clear
         statusBar.addSubview(modelLabel)
-        
+
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.stringValue = "🤖 就绪"
         statusLabel.font = NSFont.systemFont(ofSize: 11)
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.isEditable = false; statusLabel.isBordered = false; statusLabel.backgroundColor = .clear
         statusBar.addSubview(statusLabel)
-        
+
         tokenLabel.translatesAutoresizingMaskIntoConstraints = false
         tokenLabel.stringValue = "⚡ 0 tok"
         tokenLabel.font = NSFont.systemFont(ofSize: 11)
         tokenLabel.textColor = .secondaryLabelColor
         tokenLabel.isEditable = false; tokenLabel.isBordered = false; tokenLabel.backgroundColor = .clear
         statusBar.addSubview(tokenLabel)
-        
+
         balanceLabel.translatesAutoresizingMaskIntoConstraints = false
         balanceLabel.stringValue = "💰 -- 元"
         balanceLabel.font = NSFont.systemFont(ofSize: 11)
         balanceLabel.textColor = .secondaryLabelColor
         balanceLabel.isEditable = false; balanceLabel.isBordered = false; balanceLabel.backgroundColor = .clear
         statusBar.addSubview(balanceLabel)
-        
+
         NSLayoutConstraint.activate([
             statusBar.leadingAnchor.constraint(equalTo: chatContainer.leadingAnchor),
             statusBar.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor),
@@ -604,18 +601,18 @@ class ChatViewController: NSViewController {
             balanceLabel.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
         ])
     }
-    
+
     private func updateUsageDisplay() {
         let total = totalPromptTokens + totalCompletionTokens
         tokenLabel.stringValue = "⚡ \(formatNumber(totalPromptTokens)) + \(formatNumber(totalCompletionTokens)) = \(formatNumber(total)) tok"
     }
-    
 
-    
+
+
     private func loadAgents() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            
+
             let pipe = Pipe()
             let errorPipe = Pipe()
             let task = Process()
@@ -623,19 +620,19 @@ class ChatViewController: NSViewController {
             task.arguments = ["-c", "/usr/local/bin/openclaw agents list --json 2>/dev/null || echo '[]'"]
             task.standardOutput = pipe
             task.standardError = errorPipe
-            
+
             do {
                 try task.run()
-                // 使用 5 秒超时，避免阻塞主线程
+                // 使用 5 秒超时,避免阻塞主线程
                 let timeout = DispatchTime.now() + .seconds(5)
                 DispatchQueue.global().asyncAfter(deadline: timeout) {
                     if task.isRunning {
                         task.terminate()
-AppLogger.shared.log("[loadAgents] 命令超时，已终止")
+AppLogger.shared.log("[loadAgents] 命令超时,已终止")
                     }
                 }
                 task.waitUntilExit()
-                
+
                 // 检查命令执行是否成功
                 if task.terminationStatus != 0 {
                     let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
@@ -643,7 +640,7 @@ AppLogger.shared.log("[loadAgents] 命令超时，已终止")
 AppLogger.shared.log("[loadAgents] 命令失败 (exit \(task.terminationStatus)): \(errorOutput)")
                     throw NSError(domain: "WangErChat", code: Int(task.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorOutput])
                 }
-                
+
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 if let list = try? JSONDecoder().decode([AgentInfo].self, from: data), !list.isEmpty {
                     DispatchQueue.main.async {
@@ -655,9 +652,9 @@ AppLogger.shared.log("[loadAgents] 命令失败 (exit \(task.terminationStatus))
                     }
                 } else {
                     let output = String(data: data, encoding: .utf8) ?? ""
-AppLogger.shared.log("[loadAgents] 解析失败或空列表，原始输出: \(output.prefix(200))")
+AppLogger.shared.log("[loadAgents] 解析失败或空列表,原始输出: \(output.prefix(200))")
                     DispatchQueue.main.async {
-                        self.agents = [AgentInfo(id: "main", identityName: "王二（你）", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
+                        self.agents = [AgentInfo(id: "main", identityName: "王二(你)", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
                         self.agentsTableView.reloadData()
                         self.agentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
                     }
@@ -665,7 +662,7 @@ AppLogger.shared.log("[loadAgents] 解析失败或空列表，原始输出: \(ou
             } catch {
 AppLogger.shared.log("[loadAgents] 错误: \(error)")
                 DispatchQueue.main.async { [weak self] in
-                    self?.agents = [AgentInfo(id: "main", identityName: "王二（你）", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
+                    self?.agents = [AgentInfo(id: "main", identityName: "王二(你)", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
                     self?.agentsTableView.reloadData()
                     self?.agentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
                     self?.statusLabel.stringValue = "⚠️ Agents 加载失败"
@@ -673,7 +670,7 @@ AppLogger.shared.log("[loadAgents] 错误: \(error)")
             }
         }
     }
-    
+
     private func fetchBalance() {
         // 查 DeepSeek 余额
         let dsKey = AppConfig.deepseekAPIKey
@@ -740,7 +737,7 @@ AppLogger.shared.log("[Balance] DeepSeek JSON 解析错误: \(error)")
                 }
             }.resume()
         }
-        
+
         // 查 Kimi 余额
         let moonshotKey = AppConfig.moonshotAPIKey
         guard !moonshotKey.isEmpty else { return }
@@ -801,7 +798,7 @@ AppLogger.shared.log("[Balance] Kimi JSON 解析错误: \(error)")
             }.resume()
         }
     }
-    
+
     private func updateBalanceDisplay() {
         let ds = dsBalance
         let ms = moonshotBalance
@@ -815,19 +812,19 @@ AppLogger.shared.log("[Balance] Kimi JSON 解析错误: \(error)")
             balanceLabel.stringValue = "💰 -- 元"
         }
     }
-    
+
     // MARK: - 模型选择
     private func loadAvailableModels() {
         // 从 openclaw.json 读取已配置 API key 的模型
         let path = "\(NSHomeDirectory())/.openclaw/openclaw.json"
         let url = URL(fileURLWithPath: path)
-        
+
         guard FileManager.default.fileExists(atPath: path) else {
-AppLogger.shared.log("[loadAvailableModels] openclaw.json 不存在，使用默认模型")
+AppLogger.shared.log("[loadAvailableModels] openclaw.json 不存在,使用默认模型")
             availableModels = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
             return
         }
-        
+
         do {
             let data = try Data(contentsOf: url)
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -837,7 +834,7 @@ AppLogger.shared.log("[loadAvailableModels] 解析 openclaw.json 结构失败")
                 availableModels = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
                 return
             }
-            
+
             var result: [Models.ModelOption] = []
             for (providerName, providerConfig) in providers {
                 guard let config = providerConfig as? [String: Any] else { continue }
@@ -850,14 +847,14 @@ AppLogger.shared.log("[loadAvailableModels] 解析 openclaw.json 结构失败")
                     result.append(Models.ModelOption(displayName: displayName, apiModelId: "\(providerName)/\(modelId)"))
                 }
             }
-            
+
             if result.isEmpty {
                 // 兜底
                 result = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
             }
-            
+
             availableModels = result
-            // 如果当前选中模型不在可用列表中，切到第一个
+            // 如果当前选中模型不在可用列表中,切到第一个
             if !result.contains(where: { $0.displayName == currentModel }) {
                 currentModel = result.first?.displayName ?? "DeepSeek V4 Flash"
             }
@@ -869,7 +866,7 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
             }
         }
     }
-    
+
     private func setupModelMenu() {
         modelMenu.removeAllItems()
         for opt in availableModels {
@@ -893,14 +890,14 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
         dropTargetView.layer?.backgroundColor = NSColor.clear.cgColor
         dropTargetView.isHidden = true
         chatContainer.addSubview(dropTargetView, positioned: .above, relativeTo: webView)
-        
+
         dropTargetView.onDragEnter = { [weak self] in self?.showDropIndicator() }
         dropTargetView.onDragExit = { [weak self] in self?.hideDropIndicator() }
         dropTargetView.onFileDrop = { [weak self] url in
             self?.hideDropIndicator()
             self?.handleDroppedFile(url: url)
         }
-        
+
         NSLayoutConstraint.activate([
             dropTargetView.topAnchor.constraint(equalTo: webView.topAnchor),
             dropTargetView.leadingAnchor.constraint(equalTo: webView.leadingAnchor),
@@ -908,7 +905,7 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
             dropTargetView.bottomAnchor.constraint(equalTo: webView.bottomAnchor),
         ])
     }
-    
+
     private func setupDropIndicator() {
         dropIndicator.translatesAutoresizingMaskIntoConstraints = false
         dropIndicator.wantsLayer = true
@@ -918,7 +915,7 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
         dropIndicator.layer?.cornerRadius = 12
         dropIndicator.isHidden = true
         chatContainer.addSubview(dropIndicator, positioned: .above, relativeTo: dropTargetView)
-        
+
         dropLabel.translatesAutoresizingMaskIntoConstraints = false
         dropLabel.stringValue = "📁 拖放文件到此处"
         dropLabel.font = NSFont.systemFont(ofSize: 16, weight: .medium)
@@ -928,7 +925,7 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
         dropLabel.isBordered = false
         dropLabel.backgroundColor = .clear
         dropIndicator.addSubview(dropLabel)
-        
+
         NSLayoutConstraint.activate([
             dropIndicator.topAnchor.constraint(equalTo: webView.topAnchor),
             dropIndicator.leadingAnchor.constraint(equalTo: webView.leadingAnchor),
@@ -938,90 +935,90 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
             dropLabel.centerYAnchor.constraint(equalTo: dropIndicator.centerYAnchor),
         ])
     }
-    
+
     private func showDropIndicator() {
         dropIndicator.isHidden = false
         dropTargetView.isHidden = false
     }
-    
+
     private func hideDropIndicator() {
         dropIndicator.isHidden = true
         dropTargetView.isHidden = true
     }
-    
+
     // MARK: - Agent 参数面板
     private func setupAgentPanel() {
         agentPanelView.translatesAutoresizingMaskIntoConstraints = false
         sidebarView.addSubview(agentPanelView)
-        
+
         // 分割线
         let divider = NSBox()  // local scope
         divider.translatesAutoresizingMaskIntoConstraints = false
         divider.boxType = .separator
         agentPanelView.addSubview(divider)
-        
+
         agentPanelLabel.translatesAutoresizingMaskIntoConstraints = false
         agentPanelLabel.stringValue = "📋 Agent 参数"
         agentPanelLabel.font = NSFont.boldSystemFont(ofSize: 13)
         agentPanelLabel.isEditable = false; agentPanelLabel.isBordered = false; agentPanelLabel.backgroundColor = .clear
         agentPanelView.addSubview(agentPanelLabel)
-        
+
         agentPanelName.translatesAutoresizingMaskIntoConstraints = false
         agentPanelName.font = NSFont.systemFont(ofSize: 12)
         agentPanelName.isEditable = false; agentPanelName.isBordered = false; agentPanelName.backgroundColor = .clear
         agentPanelView.addSubview(agentPanelName)
-        
+
         agentPanelID.translatesAutoresizingMaskIntoConstraints = false
         agentPanelID.font = NSFont.systemFont(ofSize: 11)
         agentPanelID.textColor = .secondaryLabelColor
         agentPanelID.isEditable = false; agentPanelID.isBordered = false; agentPanelID.backgroundColor = .clear
         agentPanelView.addSubview(agentPanelID)
-        
+
         agentPanelModel.translatesAutoresizingMaskIntoConstraints = false
         agentPanelModel.font = NSFont.systemFont(ofSize: 11)
         agentPanelModel.textColor = .secondaryLabelColor
         agentPanelModel.isEditable = false; agentPanelModel.isBordered = false; agentPanelModel.backgroundColor = .clear
         agentPanelView.addSubview(agentPanelModel)
-        
+
         NSLayoutConstraint.activate([
             // Panel itself pinned to bottom of sidebar
             agentPanelView.leadingAnchor.constraint(equalTo: sidebarView.leadingAnchor),
             agentPanelView.trailingAnchor.constraint(equalTo: sidebarView.trailingAnchor),
             agentPanelView.bottomAnchor.constraint(equalTo: sidebarView.bottomAnchor),
             agentPanelView.heightAnchor.constraint(equalToConstant: 90),
-            
+
             // Divider at top of panel
             divider.topAnchor.constraint(equalTo: agentPanelView.topAnchor),
             divider.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 8),
             divider.trailingAnchor.constraint(equalTo: agentPanelView.trailingAnchor, constant: -8),
-            
+
             // Label
             agentPanelLabel.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 6),
             agentPanelLabel.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 12),
-            
+
             // Name
             agentPanelName.topAnchor.constraint(equalTo: agentPanelLabel.bottomAnchor, constant: 4),
             agentPanelName.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 12),
             agentPanelName.trailingAnchor.constraint(equalTo: agentPanelView.trailingAnchor, constant: -12),
-            
+
             // ID
             agentPanelID.topAnchor.constraint(equalTo: agentPanelName.bottomAnchor, constant: 2),
             agentPanelID.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 12),
             agentPanelID.trailingAnchor.constraint(equalTo: agentPanelView.trailingAnchor, constant: -12),
-            
+
             // Model
             agentPanelModel.topAnchor.constraint(equalTo: agentPanelID.bottomAnchor, constant: 2),
             agentPanelModel.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 12),
             agentPanelModel.trailingAnchor.constraint(equalTo: agentPanelView.trailingAnchor, constant: -12),
         ])
     }
-    
+
     private func updateAgentPanel(_ agent: AgentInfo) {
         agentPanelName.stringValue = agent.displayName
         agentPanelID.stringValue = "ID: \(agent.id)"
         agentPanelModel.stringValue = "🖥 模型: \(agent.model ?? "默认")"
     }
-    
+
     private func saveConversations() {
         do {
             let data = try JSONEncoder().encode(conversations)
@@ -1037,11 +1034,11 @@ AppLogger.shared.log("[Error] saveConversations failed: \(error)")
             }
         }
     }
-    
+
     private func loadConversations() {
         let url = URL(fileURLWithPath: savePath)
         guard FileManager.default.fileExists(atPath: savePath) else {
-AppLogger.shared.log("[loadConversations] 会话文件不存在，将创建新文件: \(savePath)")
+AppLogger.shared.log("[loadConversations] 会话文件不存在,将创建新文件: \(savePath)")
             return
         }
         do {
@@ -1059,7 +1056,7 @@ AppLogger.shared.log("[loadConversations] 已备份损坏文件到: \(backupPath
 AppLogger.shared.log("[loadConversations] 读取会话文件失败: \(error)")
         }
     }
-    
+
     @objc func doubleClickConversation() {
         let row = conversationTableView.clickedRow
         guard row >= 0, row < conversations.count else { return }
@@ -1069,7 +1066,7 @@ AppLogger.shared.log("[loadConversations] 读取会话文件失败: \(error)")
         cell.becomeFirstResponder()
         cell.delegate = self
     }
-    
+
     @objc func newConversation() {
         let conv = Conversation(title: "💬 新对话 \(conversations.count + 1)")
         conversations.append(conv)
@@ -1082,7 +1079,7 @@ AppLogger.shared.log("[loadConversations] 读取会话文件失败: \(error)")
     @objc func addAgent() {
         let alert = NSAlert()
         alert.messageText = "添加 Agent"
-        alert.informativeText = "此功能尚未实现，敬请期待。"
+        alert.informativeText = "此功能尚未实现,敬请期待。"
         alert.alertStyle = .informational
         alert.addButton(withTitle: "确定")
         alert.runModal()
@@ -1090,18 +1087,18 @@ AppLogger.shared.log("[loadConversations] 读取会话文件失败: \(error)")
     @objc func showSettings() {
         let alert = NSAlert()
         alert.messageText = "设置"
-        alert.informativeText = "设置页面尚未实现，敬请期待。"
+        alert.informativeText = "设置页面尚未实现,敬请期待。"
         alert.alertStyle = .informational
         alert.addButton(withTitle: "确定")
         alert.runModal()
     }
-    
+
     // MARK: - Chat HTML
     private func loadChatHTML() { webView.loadHTMLString(chatHTML(), baseURL: nil) }
     private func chatHTML() -> String { return """
         <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark">
         <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,"SF Pro","PingFang SC",sans-serif;font-size:14px;line-height:1.6;padding:16px;color:#1d1d1f;overflow-y:auto}@media(prefers-color-scheme:dark){body{color:#f5f5f7}}.message{margin-bottom:16px;padding:10px 14px;border-radius:12px;max-width:85%;word-wrap:break-word;white-space:pre-wrap}.user{background:#007aff;color:white;margin-left:auto;border-bottom-right-radius:4px}.assistant{background:#e9e9eb;margin-right:auto;border-bottom-left-radius:4px}@media(prefers-color-scheme:dark){.assistant{background:#2c2c2e}}.message code{font-family:"SF Mono",Menlo,monospace;font-size:13px}.typing{opacity:.5;animation:blink 1s ease-in-out infinite}@keyframes blink{50%{opacity:.2}}.time{font-size:11px;opacity:.5;margin-top:4px}#messages{padding-bottom:8px}.welcome{text-align:center;margin-top:40%;opacity:.4}.welcome h2{font-size:24px;margin-bottom:8px}.welcome p{font-size:14px}.file-card{display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(0,122,255,0.08);border-radius:10px;border:1px solid rgba(0,122,255,0.15);margin-top:6px;cursor:pointer;transition:background 0.15s}.file-card:hover{background:rgba(0,122,255,0.14)}.file-icon{font-size:28px;flex-shrink:0}.file-info{flex:1;min-width:0}.file-name{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-size{font-size:11px;opacity:.6;margin-top:1px}.file-badge{font-size:11px;padding:2px 8px;border-radius:4px;background:rgba(0,122,255,0.12);color:#007aff;font-weight:500}.image-preview{max-width:min(100%,400px);max-height:320px;border-radius:10px;margin-top:6px;cursor:pointer;transition:opacity 0.15s;display:block;object-fit:contain}.image-preview:hover{opacity:0.85}.user .file-card,.user .file-badge{background:rgba(255,255,255,0.15);border-color:rgba(255,255,255,0.2)}.user .file-badge{color:rgba(255,255,255,0.9)}@media(prefers-color-scheme:dark){.file-card{background:rgba(0,122,255,0.12);border-color:rgba(0,122,255,0.2)}.file-card:hover{background:rgba(0,122,255,0.2)}}.img-grid{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.img-grid .image-preview{max-width:200px;max-height:200px;margin-top:0}.code-preview{margin-top:6px;border-radius:8px;overflow:hidden;border:1px solid rgba(128,128,128,0.2)}.code-preview pre{margin:0;padding:10px 14px;font-family:"SF Mono",Menlo,monospace;font-size:12px;line-height:1.5;overflow-x:auto;background:rgba(128,128,128,0.06);white-space:pre-wrap;word-break:break-word}.code-preview .code-header{display:flex;justify-content:space-between;align-items:center;padding:4px 10px;font-size:11px;background:rgba(128,128,128,0.08);color:rgba(128,128,128,0.7)}.code-preview .code-header .lang{font-weight:600;text-transform:uppercase}</style></head><body>
-        <div id="messages"><div class="welcome"><h2>👋 你好，王鹏飞</h2><p>发送消息开始对话</p></div></div>
+        <div id="messages"><div class="welcome"><h2>👋 你好,王鹏飞</h2><p>发送消息开始对话</p></div></div>
         <script>
         function scrollToEnd(){try{var m=document.getElementById('messages');if(m)m.scrollIntoView({block:'end',behavior:'smooth'})}catch(e){}}function addMessage(r,c){try{removeWelcome();var m=document.getElementById('messages');if(!m)return null;var d=document.createElement('div');d.className='message '+r;d.innerHTML='<p>'+esc(c)+'</p>';var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);scrollToEnd();return d}catch(e){console.error('addMessage:',e);return null}}
         function apd(t){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var l=document.getElementById('s');if(!l){var d=document.createElement('div');d.className='message assistant';d.id='s';d.innerHTML='<p></p>';d.appendChild(document.createElement('div')).className='time';m.appendChild(d);l=d}var p=l.querySelector('p');if(p)p.textContent+=t;scrollToEnd()}catch(e){console.error('apd:',e)}}
@@ -1117,24 +1114,11 @@ AppLogger.shared.log("[loadConversations] 读取会话文件失败: \(error)")
         """}
 }
 
-// MARK: - Key handling via NSTextView subclass
-class SendTextView: NSTextView {
-    var onCommandEnter: (() -> Void)?
-    
-    override func keyDown(with event: NSEvent) {
-        if event.modifierFlags.contains(.command) && event.keyCode == 36 { // enter
-            onCommandEnter?()
-            return
-        }
-        super.keyDown(with: event)
-    }
-}
-
 extension ChatViewController: NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
         // no-op: just to keep delegate wired
     }
-    
+
     private func send() {
         let text = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isGenerating else { return }
@@ -1143,9 +1127,9 @@ extension ChatViewController: NSTextViewDelegate {
         js("addMessage('user','\(escJS(text))')")
         sendStreamToGateway(text)
     }
-    
+
     @objc func sendMessage() { send() }
-    
+
     @objc func stopGeneration() {
         currentStreamTask?.cancel(); currentStreamTask = nil
         currentURLSession?.invalidateAndCancel(); currentURLSession = nil
@@ -1154,7 +1138,7 @@ extension ChatViewController: NSTextViewDelegate {
             finalizeAndUpdateStats()
         }
     }
-    
+
     private func resetSafetyTimer() {
         safetyTimer?.invalidate()
         DispatchQueue.main.async {
@@ -1163,26 +1147,26 @@ extension ChatViewController: NSTextViewDelegate {
                 self.currentStreamTask?.cancel()
                 self.currentStreamTask = nil
                 self.js("rt()")
-                self.js("addMessage('assistant','⚠️ 生成超时（30分钟），已自动中断')")
+                self.js("addMessage('assistant','⚠️ 生成超时(30分钟),已自动中断')")
                 self.stopGenerating()
             }
         }
     }
-    
-    /// 启动流式请求的公共方法（提取三个 sendXxxToGateway 中的重复逻辑）
+
+    /// 启动流式请求的公共方法(提取三个 sendXxxToGateway 中的重复逻辑)
     private func startStreamingRequest(body: [String: Any], statusText: String, statusIcon: String) {
         guard !AppConfig.gatewayToken.isEmpty else {
-            js("addMessage('assistant','❌ Gateway Token 未配置，请检查 openclaw.json')")
+            js("addMessage('assistant','❌ Gateway Token 未配置,请检查 openclaw.json')")
             statusLabel.stringValue = "⚠️ Token 未配置"
             return
         }
-        
+
         guard URL(string: "\(AppConfig.gatewayURL)/v1/responses") != nil else {
             js("addMessage('assistant','❌ Gateway 地址无效')")
             statusLabel.stringValue = "⚠️ 地址无效"
             return
         }
-        
+
         isGenerating = true
         isFinalizing = false
         sendButton.isHidden = true; stopButton.isHidden = false
@@ -1191,17 +1175,17 @@ extension ChatViewController: NSTextViewDelegate {
         js("at()")
         resetSafetyTimer()
         sseBuffer = ""
-        
+
         var req = URLRequest(url: URL(string: "\(AppConfig.gatewayURL)/v1/responses")!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(AppConfig.gatewayToken)", forHTTPHeaderField: "Authorization")
         req.setValue(currentAgentId, forHTTPHeaderField: "x-openclaw-agent-id")
-        
+
         let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
 AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedModel)")
         req.setValue(mappedModel, forHTTPHeaderField: "x-openclaw-model")
-        
+
         do {
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
         } catch {
@@ -1211,24 +1195,24 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
             }
             return
         }
-        
+
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 1860
         config.timeoutIntervalForResource = 3600
-        
+
         currentURLSession?.invalidateAndCancel()
         let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         currentURLSession = session
         let task = session.dataTask(with: req)
         currentStreamTask = task; task.resume()
     }
-    
+
     private func sendStreamToGateway(_ text: String) {
         guard !text.isEmpty else {
             statusLabel.stringValue = "⚠️ 消息不能为空"
             return
         }
-        
+
         let recentMessages = Array(currentMessages.suffix(20))
         let inputItems: [[String: Any]] = recentMessages.map { msg in
             let role = msg["role"] ?? "user"
@@ -1239,10 +1223,10 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
                 "content": [["type": "input_text", "text": content]]
             ]
         }
-        
+
         let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
-        
+
         startStreamingRequest(
             body: [
                 "model": "openclaw",
@@ -1254,7 +1238,7 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
             statusIcon: "🚀"
         )
     }
-    
+
     private func stopGenerating() {
         isGenerating = false; isFinalizing = false; sendButton.isHidden = false; stopButton.isHidden = true
         // 方案1&3: 使用增强状态系统
@@ -1264,7 +1248,7 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
         setStatusBarColor(.clear, alpha: 0)
         safetyTimer?.invalidate()
     }
-    
+
     fileprivate func js(_ code: String) {
         webView.evaluateJavaScript(code) { [weak self] _, error in
             guard let self = self else { return }
@@ -1282,7 +1266,7 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
                 }
                 self.jsErrorCount += 1
                 if self.jsErrorCount >= 5 {
-                    AppLogger.shared.log("[WebView] JS 连续崩溃 \(self.jsErrorCount) 次，重新加载 WebView")
+                    AppLogger.shared.log("[WebView] JS 连续崩溃 \(self.jsErrorCount) 次,重新加载 WebView")
                     self.jsErrorCount = 0
                     DispatchQueue.main.async {
                         let html = self.chatHTML()
@@ -1312,25 +1296,25 @@ extension ChatViewController: URLSessionDataDelegate {
             completionHandler(.allow)
             return
         }
-        
+
         if httpResponse.statusCode != 200 {
             AppLogger.shared.log("[HTTP Error] 状态码: \(httpResponse.statusCode)")
-            // 不阻止接收，但标记错误状态，后续 didReceive data 中会检查
+            // 不阻止接收,但标记错误状态,后续 didReceive data 中会检查
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 // 显示错误状态
                 self.setStatusForce("❌ HTTP \(httpResponse.statusCode)", priority: .ready)
                 self.hideStepIndicator()
-                
+
                 // 在聊天区显示错误
-                let errorMsg = "⚠️ Gateway 返回 HTTP \(httpResponse.statusCode)\n模型可能未在 Gateway 中注册，或 API Key 无效。"
+                let errorMsg = "⚠️ Gateway 返回 HTTP \(httpResponse.statusCode)\n模型可能未在 Gateway 中注册,或 API Key 无效。"
                 self.js("addMessage('assistant','\(self.escJS(errorMsg))')")
             }
         }
-        
+
         completionHandler(.allow)
     }
-    
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         guard !data.isEmpty else { return }
         guard let chunk = String(data: data, encoding: .utf8) else {
@@ -1341,32 +1325,32 @@ AppLogger.shared.log("[SSE Error] 无法将数据解码为 UTF-8")
             }
             return
         }
-        
+
         // 追加到累积缓冲区
         sseBuffer += chunk
-        
+
         // 按 \n\n 分割完整事件块
         let blocks = sseBuffer.components(separatedBy: "\n\n")
-        // 最后一段可能是不完整的，留在缓冲区等待下一批
+        // 最后一段可能是不完整的,留在缓冲区等待下一批
         if sseBuffer.hasSuffix("\n\n") {
             sseBuffer = ""
         } else {
             sseBuffer = blocks.last ?? ""
         }
-        
-        // 处理完整的块（排除最后一个不完整的）
+
+        // 处理完整的块(排除最后一个不完整的)
         let completeBlocks = blocks.dropLast(blocks.count > 1 && !sseBuffer.isEmpty ? 1 : 0)
-        
+
         var foundDone = false
-        
+
         for block in completeBlocks {
             let trimmed = block.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
-            
+
             let lines = trimmed.components(separatedBy: "\n")
             var currentEvent = ""
             var currentData = ""
-            
+
             for line in lines {
                 if line.hasPrefix("event: ") {
                     currentEvent = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
@@ -1374,91 +1358,91 @@ AppLogger.shared.log("[SSE Error] 无法将数据解码为 UTF-8")
                     currentData = String(line.dropFirst(6)).trimmingCharacters(in: .whitespaces)
                 }
             }
-            
+
             if currentData == "[DONE]" {
                 foundDone = true
                 break
             }
-            
+
             if !currentData.isEmpty {
                 processResponsesEvent(event: currentEvent, data: currentData)
             }
         }
-        
+
         if foundDone {
             DispatchQueue.main.async { self.finalizeAndUpdateStats() }
             return
         }
     }
-    
+
     /// 设置状态栏颜色
     private func setStatusBarColor(_ color: NSColor, alpha: CGFloat = 0.12) {
         statusBar.layer?.backgroundColor = color.withAlphaComponent(alpha).cgColor
     }
-    
+
     /// 重置状态栏颜色
     private func resetStatusBarColor() {
         statusBar.layer?.backgroundColor = nil
     }
-    
 
-    
+
+
     /// 线程安全的 activeToolStack 操作
     private func pushTool(_ name: String) {
         activeToolStack.append(name)
     }
-    
+
     private func popTool() {
         if !activeToolStack.isEmpty {
             activeToolStack.removeLast()
         }
     }
-    
+
     private func resetToolStack() {
         activeToolStack = []
     }
-    
+
     /// 安全设置状态文本
     private func setStatus(_ text: String) {
         // 直接赋值
         statusLabel.stringValue = text
         statusLabel.needsDisplay = true
     }
-    
+
     private func processResponsesEvent(event: String, data: String) {
         guard !data.isEmpty else { return }
-        
+
         guard let d = data.data(using: .utf8) else {
 AppLogger.shared.log("[SSE Error] 无法将 event data 转为 Data")
             return
         }
-        
+
         guard let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
 AppLogger.shared.log("[SSE Error] JSON 解析失败: \(data.prefix(200))")
             return
         }
-        
+
         guard let type = j["type"] as? String else {
 AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200))")
             return
         }
-        
-        // 整个事件处理必须在主线程，确保数据安全
+
+        // 整个事件处理必须在主线程,确保数据安全
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            
+
             // 方案1&3: 使用增强状态系统
             switch type {
             case "response.created":
                 self.resetToolStack()
                 self.setStatusAdvanced("🤖 启动...", priority: .thinking, color: .systemBlue, alpha: 0.30)
                 self.showStepIndicator(icon: "🚀", text: "正在启动请求...", progress: 10)
-                
+
             case "response.in_progress":
                 self.setStatusAdvanced("🤖 思考中...", priority: .thinking, color: .systemBlue, alpha: 0.35)
                 self.showStepIndicator(icon: "🤔", text: "正在思考...", progress: 30)
                 self.startStatusIconAnimation(icons: self.thinkingIcons)
-                
+
             case "response.output_item.added":
                 if let item = j["item"] as? [String: Any], item["type"] as? String == "function_call" {
                     let name = item["name"] as? String ?? ""
@@ -1466,7 +1450,7 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200)
                     let friendlyName = friendlyToolName(name)
                     let summary = toolArgsSummary(args)
                     self.pushTool(name)
-                    
+
                     let statusText: String
                     if !summary.isEmpty {
                         statusText = "🔧 \(friendlyName): \(summary)"
@@ -1483,31 +1467,31 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200)
                     self.setStatusAdvanced("🤖 思考中...", priority: .thinking, color: .systemBlue, alpha: 0.35)
                     self.showStepIndicator(icon: "🤔", text: "正在思考...", progress: 30)
                 }
-                
+
             case "response.content_part.added":
                 if let part = j["part"] as? [String: Any], part["type"] as? String == "text" {
                     self.setStatusAdvanced("✍️ 准备输出...", priority: .generating, color: .systemGreen, alpha: 0.35)
                     self.showStepIndicator(icon: "✍️", text: "准备输出内容...", progress: 60)
                 }
-                
+
             case "response.function_call_arguments.delta":
                 if let delta = j["delta"] as? String, !delta.isEmpty {
                     self.setStatusAdvanced("🔧 参数输入中...", priority: .toolCall, color: .systemOrange, alpha: 0.50)
                 }
-                
+
             case "response.function_call_arguments.done":
                 if let name = j["name"] as? String {
                     let friendlyName = friendlyToolName(name)
                     self.setStatusAdvanced("✅ 参数就绪: \(friendlyName)", priority: .toolCall, color: .systemOrange, alpha: 0.35)
                 }
-                
+
             case "response.reasoning_text.delta":
                 self.setStatusAdvanced("🧠 深度思考...", priority: .reasoning, color: .systemPurple, alpha: 0.50)
                 self.showStepIndicator(icon: "🧠", text: "深度推理中...", progress: 40)
-                
+
             case "response.reasoning_summary_text.delta":
                 self.setStatusAdvanced("🧠 推理总结中...", priority: .reasoning, color: .systemPurple, alpha: 0.40)
-                
+
             case "response.output_text.delta":
                 if let content = j["delta"] as? String {
                     self.js("apd('\(self.escJS(content))')")
@@ -1520,11 +1504,11 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200)
                 } else {
 AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
                 }
-                
+
             case "response.output_text.done":
                 self.setStatusAdvanced("✅ 输出完成", priority: .generating, color: .systemGreen, alpha: 0.30)
                 self.showStepIndicator(icon: "✅", text: "回复生成完成", progress: 100)
-                
+
             case "response.content_part.done":
                 if let part = j["part"] as? [String: Any] {
                     if part["type"] as? String == "function_call" {
@@ -1536,7 +1520,7 @@ AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
                         self.setStatusAdvanced("✅ 内容块完成", priority: .generating, color: .systemGreen, alpha: 0.25)
                     }
                 }
-                
+
             case "response.output_item.done":
                 if let item = j["item"] as? [String: Any] {
                     if item["type"] as? String == "function_call" {
@@ -1551,11 +1535,11 @@ AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
                             self.showStepIndicator(icon: "🔧", text: "工具已调用: \(friendlyName)", progress: 55)
                         }
                     } else if item["type"] as? String == "reasoning" {
-                        self.setStatusAdvanced("🤖 思考完成，准备回复...", priority: .thinking, color: .systemBlue, alpha: 0.30)
-                        self.showStepIndicator(icon: "🤔", text: "思考完成，准备回复...", progress: 60)
+                        self.setStatusAdvanced("🤖 思考完成,准备回复...", priority: .thinking, color: .systemBlue, alpha: 0.30)
+                        self.showStepIndicator(icon: "🤔", text: "思考完成,准备回复...", progress: 60)
                     }
                 }
-                
+
             case "response.completed":
                 if let resp = j["response"] as? [String: Any], let usage = resp["usage"] as? [String: Any] {
                     if let inputTokens = usage["input_tokens"] as? Int {
@@ -1570,7 +1554,7 @@ AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
                 self.hideStepIndicator()
                 self.stopStatusIconAnimation()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.finalizeAndUpdateStats() }
-                
+
             case "response.failed":
                 if let err = j["error"] as? [String: Any], let msg = err["message"] as? String {
                     self.js("addMessage('assistant','❌ 错误: \(self.escJS(msg))')")
@@ -1579,22 +1563,22 @@ AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
                 self.hideStepIndicator()
                 self.stopStatusIconAnimation()
                 DispatchQueue.main.async { self.finalizeAndUpdateStats() }
-                
+
             default:
 AppLogger.shared.log("[SSE] 未处理事件类型: \(type)")
                 break
             }
         }
     }
-    
+
     private func finalizeAndUpdateStats() {
-        // 幂等锁：防止重复调用（response.completed + [DONE] 双重触发）
+        // 幂等锁:防止重复调用(response.completed + [DONE] 双重触发)
         guard !isFinalizing else { return }
         isFinalizing = true
-        
+
         // 先停止 typing 动画
         js("rt()")
-        
+
         let getJS = """
             (function(){
                 var e=document.getElementById('s');
@@ -1608,8 +1592,8 @@ AppLogger.shared.log("[SSE] 未处理事件类型: \(type)")
                 return t;
             })()
             """
-        
-        // 使用弱引用避免循环引用，延迟执行避免 JS race condition
+
+        // 使用弱引用避免循环引用,延迟执行避免 JS race condition
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self = self else { return }
             self.webView.evaluateJavaScript(getJS) { [weak self] r, error in
@@ -1631,7 +1615,7 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
             }
         }
     }
-    
+
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         DispatchQueue.main.async {
             if let e = error as NSError? {
@@ -1649,30 +1633,30 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
                     self.stopGenerating()
                 }
             } else if error == nil && self.isGenerating {
-                AppLogger.shared.log("[Stream] 连接正常关闭，执行兜底 finalize")
+                AppLogger.shared.log("[Stream] 连接正常关闭,执行兜底 finalize")
                 if !self.isFinalizing {
                     self.finalizeAndUpdateStats()
                 } else {
-                    AppLogger.shared.log("[Stream] isFinalizing=true，直接 stopGenerating")
+                    AppLogger.shared.log("[Stream] isFinalizing=true,直接 stopGenerating")
                     self.stopGenerating()
                 }
             }
         }
     }
-    
+
     // MARK: - 文件发送
     private func sendFile(data: Data, filename: String, mimeType: String) {
         let text = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isGenerating else { return }
-        
+
         // 判断是否为图片类型
         let isImage = mimeType.hasPrefix("image/")
-        
+
         // 拼消息
         let base64 = data.base64EncodedString()
-        
+
         if isImage {
-            // 图片：存缓存 + 渲染预览 + 发送
+            // 图片:存缓存 + 渲染预览 + 发送
             let fileId = saveFileToCache(data: data, filename: filename)
             let dataUrl = "data:\(mimeType);base64,\(base64)"
             currentMessages.append(["role": "user", "content": "[图片] \(filename)", "type": "image", "fileId": fileId])
@@ -1680,7 +1664,7 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
             // 发送图片到 Gateway
             sendImageToGateway(imageData: dataUrl, filename: filename, text: text)
         } else {
-            // 文件：存缓存 + 渲染卡片 + 发送
+            // 文件:存缓存 + 渲染卡片 + 发送
             let fileId = saveFileToCache(data: data, filename: filename)
             let ext = fileExtension(filename)
             let fileSizeStr = formatFileSize(data.count)
@@ -1689,10 +1673,10 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
             // 发送文件到 Gateway
             sendFileToGateway(fileData: base64, filename: filename, mimeType: mimeType, text: text)
         }
-        
+
         textView.string = ""
     }
-    
+
     private func sendImageToGateway(imageData: String, filename: String, text: String) {
         // 构建带图片的消息
         var contentParts: [[String: Any]] = []
@@ -1707,7 +1691,7 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
                 "text": text
             ])
         }
-        
+
         let inputItems: [[String: Any]] = [
             [
                 "type": "message",
@@ -1715,10 +1699,10 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
                 "content": contentParts
             ]
         ]
-        
+
         let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
-        
+
         startStreamingRequest(
             body: [
                 "model": "openclaw",
@@ -1730,7 +1714,7 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
             statusIcon: "🖼️"
         )
     }
-    
+
     private func sendFileToGateway(fileData: String, filename: String, mimeType: String, text: String) {
         // 构建文件消息
         var contentParts: [[String: Any]] = []
@@ -1745,7 +1729,7 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
                 "text": text
             ])
         }
-        
+
         let inputItems: [[String: Any]] = [
             [
                 "type": "message",
@@ -1753,10 +1737,10 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
                 "content": contentParts
             ]
         ]
-        
+
         let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
-        
+
         startStreamingRequest(
             body: [
                 "model": "openclaw",
@@ -1768,7 +1752,7 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
             statusIcon: "📎"
         )
     }
-    
+
     private func switchToConversation(_ index: Int) {
         guard !conversations.isEmpty else {
 AppLogger.shared.log("[Error] switchToConversation: 无可用会话")
@@ -1804,7 +1788,7 @@ AppLogger.shared.log("[Warning] Message \(msgIndex) has empty content, skipping"
                     continue
                 }
                 if type == "image", let fileId = msg["fileId"] {
-                    // 恢复图片消息：从缓存读文件，生成 data URL 渲染
+                    // 恢复图片消息:从缓存读文件,生成 data URL 渲染
                     let fileURL = self.cachedFileURL(fileId: fileId)
                     if let imageData = try? Data(contentsOf: fileURL) {
                         let mimeType = mimeTypeForFile(fileId)
@@ -1814,7 +1798,7 @@ AppLogger.shared.log("[Warning] Message \(msgIndex) has empty content, skipping"
                         self.js("addMessage('\(self.escJS(role))','\(self.escJS(content)) [缓存丢失]')")
                     }
                 } else if type == "file", let fileId = msg["fileId"] {
-                    // 恢复文件消息：渲染文件卡片
+                    // 恢复文件消息:渲染文件卡片
                     let fileURL = self.cachedFileURL(fileId: fileId)
                     let fileSize = Int(msg["fileSize"] ?? "0") ?? 0
                     let fileSizeStr = formatFileSize(fileSize)
@@ -1850,14 +1834,14 @@ extension ChatViewController: NSTextFieldDelegate {
 
 // MARK: - 文件拖拽处理
 extension ChatViewController {
-    
-    private func handleDroppedFile(url: URL) {
+
+    func handleDroppedFile(url: URL) {
         guard url.isFileURL else { return }
-        
+
         do {
             let data = try Data(contentsOf: url)
             let filename = url.lastPathComponent
-            
+
             // 获取 UTI 并映射到 MIME type
             var mimeType = "application/octet-stream"
             if let uti = try? url.resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier,
@@ -1865,17 +1849,17 @@ extension ChatViewController {
                let preferredMIME = utType.preferredMIMEType {
                 mimeType = preferredMIME
             }
-            
+
             // 限制文件大小 (50MB)
             let maxSize: UInt64 = 50 * 1024 * 1024
             let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? data.count
             guard UInt64(fileSize) <= maxSize else {
                 DispatchQueue.main.async {
-                    self.js("addMessage('assistant','⚠️ 文件超过 50MB 限制，请压缩后重试')")
+                    self.js("addMessage('assistant','⚠️ 文件超过 50MB 限制,请压缩后重试')")
                 }
                 return
             }
-            
+
             DispatchQueue.main.async {
                 self.sendFile(data: data, filename: filename, mimeType: mimeType)
             }
@@ -1888,95 +1872,6 @@ AppLogger.shared.log("[File Drop] 读取文件失败: \(error)")
     }
 }
 
-// MARK: - WKUIDelegate (拦截文件拖拽到 WKWebView)
-extension ChatViewController: WKUIDelegate {
-    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
-        // 文件选择面板（从网页触发）
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.begin { result in
-            if result == .OK, let url = panel.url {
-                completionHandler([url])
-                self.handleDroppedFile(url: url)
-            } else {
-                completionHandler(nil)
-            }
-        }
-    }
-}
-
-// MARK: - WKScriptMessageHandler (JS → Native 消息)
-extension ChatViewController: WKScriptMessageHandler {
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        if message.name == "fileOpen", let fileId = message.body as? String {
-            openCachedFile(fileId: fileId)
-        }
-    }
-    
-    private func openCachedFile(fileId: String) {
-        let fileURL = cachedFileURL(fileId: fileId)
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-AppLogger.shared.log("[File Open] 文件不存在: \(fileId)")
-            return
-        }
-        NSWorkspace.shared.open(fileURL)
-    }
-    
-    private func cachedFileURL(fileId: String) -> URL {
-        let dir = filesCacheDir()
-        return dir.appendingPathComponent(fileId)
-    }
-    
-    private func filesCacheDir() -> URL {
-        let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = supportDir.appendingPathComponent("WangEr/files", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
-    
-    private func saveFileToCache(data: Data, filename: String) -> String {
-        let dir = filesCacheDir()
-        let fileId = UUID().uuidString + "_" + filename
-        let url = dir.appendingPathComponent(fileId)
-        try? data.write(to: url)
-        
-        // 异步清理旧缓存
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            self?.cleanupOldCacheFiles()
-        }
-        
-        return fileId
-    }
-    
-    /// 清理旧缓存文件：限制总大小和文件数量
-    private func cleanupOldCacheFiles() {
-        let dir = filesCacheDir()
-        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey], options: []) else { return }
-        
-        // 按修改时间排序（最旧的在前）
-        let sortedFiles = files.compactMap { url -> (URL, Date, UInt64)? in
-            guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-                  let modDate = attrs[.modificationDate] as? Date,
-                  let fileSize = attrs[.size] as? UInt64 else { return nil }
-            return (url, modDate, fileSize)
-        }.sorted { $0.1 < $1.1 }
-        
-        var totalSize: UInt64 = sortedFiles.reduce(0) { $0 + $1.2 }
-        var fileCount = sortedFiles.count
-        
-        // 如果超过限制，删除最旧的文件
-        for (url, _, size) in sortedFiles {
-            if totalSize <= maxCacheSize && fileCount <= maxCacheFiles { break }
-            try? FileManager.default.removeItem(at: url)
-            totalSize -= size
-            fileCount -= 1
-        }
-    }
-    
-
-}
 
 // MARK: - NSTableView
 extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
@@ -1984,7 +1879,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
         if tableView == conversationTableView { return conversations.count }
         return agents.count
     }
-    
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let id = NSUserInterfaceItemIdentifier("c")
         var cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView
@@ -2002,7 +1897,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
         cell?.textField?.sizeToFit()
         return cell
     }
-    
+
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard let tableView = notification.object as? NSTableView else { return }
         let row = tableView.selectedRow
