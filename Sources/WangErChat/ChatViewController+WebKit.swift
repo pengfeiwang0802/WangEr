@@ -96,13 +96,3 @@ extension ChatViewController: WKScriptMessageHandler {
         NSWorkspace.shared.open(fileURL)
     }
 }
-
-// MARK: - 虚拟形象 WKNavigationDelegate
-
-extension ChatViewController: WKNavigationDelegate {
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if webView == avatarWebView {
-            avatarDidLoad()
-        }
-    }
-}
