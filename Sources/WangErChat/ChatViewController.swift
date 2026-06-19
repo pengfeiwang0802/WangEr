@@ -987,6 +987,13 @@ extension ChatViewController: NSTextViewDelegate {
         guard !text.isEmpty, !isGenerating else { return }
         textView.string = ""
         userExpressionActive = false  // 新消息发送时重置，允许下次 .ready 恢复默认表情
+
+        // 解析用户输入中的表情关键词，立即触发 avatar 表情变化
+        if let expression = parseExpressionFromUserInput(text) {
+            AppLogger.shared.log("[Avatar] 用户关键词触发表情: \(expression)")
+            setAvatarExpression(expression, userInitiated: true)
+        }
+
         currentMessages.append(["role": "user", "content": text])
         js("addMessage('user','\(escJS(text))')")
         sendStreamToGateway(text)
@@ -1091,21 +1098,13 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
         let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
 
-        // 虚拟形象控制指令 — 告诉大模型它有虚拟形象，可以控制表情
-        let avatarInstruction = "你有一个虚拟形象（二次元风格、大眼睛、双马尾的女生），它代表你的视觉呈现。" +
-            "当用户想让你做表情时（例如「你笑一下」「做个鬼脸」「委屈」「开心」等），" +
-            "请在回复中嵌入一个表情标记来控制形象表情。" +
-            "支持的标记格式为 [表情:xxx]，其中 xxx 可以是：" +
-            "neutral（平静）、happy（微笑/开心）、thinking（思考）、sad（难过/委屈）、surprised（惊讶）。" +
-            "例如用户说「你笑一下」，你可以在回复中写「好的 [表情:happy]」" +
-            "标记不会显示给用户，仅用于控制形象。" +
-            "如果用户没有提到表情相关的内容，不要输出标记。"
+        // 虚拟形象表情控制已改为客户端关键词解析，不再依赖大模型输出 [表情:xxx] 标记
+        // 保留 processExpressionTag/expressionTagBuffer 作为 fallback（万一模型自己输出了标记）
 
         startStreamingRequest(
             body: [
                 "model": "openclaw",
                 "input": inputItems,
-                "instructions": avatarInstruction,
                 "max_output_tokens": 16384, "temperature": temperature,
                 "stream": true
             ] as [String: Any],
@@ -1260,7 +1259,18 @@ AppLogger.shared.log("[SSE Error] 无法将数据解码为 UTF-8")
         statusBar.layer?.backgroundColor = nil
     }
 
-    /// 检测并处理 [表情:xxx] 标记
+    /// 从用户输入中解析表情关键词，返回对应的表情名
+    private func parseExpressionFromUserInput(_ text: String) -> String? {
+        let lower = text.lowercased()
+        if lower.contains("笑") || lower.contains("开心") || lower.contains("高兴") || lower.contains("乐") || lower.contains("😊") || lower.contains("😄") { return "happy" }
+        if lower.contains("哭") || lower.contains("委屈") || lower.contains("沮丧") || lower.contains("难过") || lower.contains("伤心") || lower.contains("😢") || lower.contains("😞") { return "sad" }
+        if lower.contains("惊讶") || lower.contains("吓") || lower.contains("震惊") || lower.contains("😲") || lower.contains("😮") { return "surprised" }
+        if lower.contains("想你") || lower.contains("思考") || lower.contains("琢磨") || lower.contains("🤔") { return "thinking" }
+        if lower.contains("平静") || lower.contains("淡定") || lower.contains("面无表情") || lower.contains("无表情") || lower.contains("😐") { return "neutral" }
+        return nil
+    }
+
+    /// 检测并处理 [表情:xxx] 标记（保留作为 fallback，但不作为主要触发方式）
     /// - Returns: (移除标记后的文本, 是否匹配到标记)
     private func processExpressionTag(_ text: String) -> (String, Bool) {
         let pattern = #"\[表情:([a-zA-Z]+)\]"#
@@ -1268,7 +1278,13 @@ AppLogger.shared.log("[SSE Error] 无法将数据解码为 UTF-8")
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else {
             return (text, false)
         }
-        let expression = String(text[Range(match.range(at: 1), in: text)!])
+        var expression = String(text[Range(match.range(at: 1), in: text)!])
+        // fallback: 大模型有时输出 xxx 或无效值，映射到 neutral
+        let valid = ["neutral", "happy", "thinking", "sad", "surprised"]
+        if !valid.contains(expression) {
+            AppLogger.shared.log("[Avatar] 无效表情标记: \(expression)，fallback 到 neutral")
+            expression = "neutral"
+        }
         AppLogger.shared.log("[Avatar] 检测到表情标记: \(expression)，缓冲区内容: \(text)")
         self.setAvatarExpression(expression, userInitiated: true)
         // 移除标记，保留其他内容
