@@ -70,15 +70,22 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
         if cell == nil {
             cell = NSTableCellView(); cell?.identifier = id
             let tf = NSTextField(); tf.isBezeled = false; tf.drawsBackground = false; tf.isEditable = false
-            tf.font = NSFont.systemFont(ofSize: 12); cell?.addSubview(tf); cell?.textField = tf
+            tf.font = NSFont.systemFont(ofSize: 12)
+            tf.translatesAutoresizingMaskIntoConstraints = false
+            tf.lineBreakMode = .byTruncatingTail
+            cell?.addSubview(tf); cell?.textField = tf
+            // 垂直居中
+            NSLayoutConstraint.activate([
+                tf.leadingAnchor.constraint(equalTo: cell!.leadingAnchor, constant: 8),
+                tf.trailingAnchor.constraint(equalTo: cell!.trailingAnchor, constant: -4),
+                tf.centerYAnchor.constraint(equalTo: cell!.centerYAnchor),
+            ])
         }
         if tableView == conversationTableView {
             cell?.textField?.stringValue = conversations[safe: row]?.title ?? "会话"
         } else {
             cell?.textField?.stringValue = agents[safe: row]?.displayName ?? ""
         }
-        cell?.textField?.frame = NSRect(x: 4, y: 0, width: 200, height: 32)
-        cell?.textField?.sizeToFit()
         return cell
     }
 
