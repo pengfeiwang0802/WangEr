@@ -15,11 +15,11 @@ class ChatViewController: NSViewController {
     // 边栏
     private let conversationLabel = NSTextField()
     private let newChatButton = NSButton()
-    private(set) let conversationTableView = NSTableView()
+    let conversationTableView = NSTableView()
     private let conversationScrollView = NSScrollView()
     private let agentsLabel = NSTextField()
     private let addAgentButton = NSButton()
-    private let agentsTableView = NSTableView()
+    let agentsTableView = NSTableView()
     private let agentsScrollView = NSScrollView()
     private let sidebarDivider = NSBox()
 
@@ -63,7 +63,7 @@ class ChatViewController: NSViewController {
     private var availableModels: [Models.ModelOption] = []
 
     // === 状态 ===
-    private(set) var conversations: [Conversation] = []
+    var conversations: [Conversation] = []
     private var currentConversationIndex = 0
     private var isGenerating = false
     private var isFinalizing = false // 幂等锁:防止 finalize 被多次调用
@@ -126,7 +126,7 @@ class ChatViewController: NSViewController {
     private var dsBalance: String = "--"
     private var moonshotBalance: String = "--"
     private(set) var agents: [AgentInfo] = []
-    private(set) var currentAgentId = "main"
+    var currentAgentId = "main"
 
     private var currentMessages: [[String: String]] {
         get { conversations[safe: currentConversationIndex]?.messages ?? [] }
