@@ -1266,8 +1266,6 @@ AppLogger.shared.log("[SSE Error] 无法将数据解码为 UTF-8")
         let pattern = #"\[表情:([a-zA-Z]+)\]"#
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else {
-            // 调试：打印 buffer 内容，看看为什么没匹配到
-            AppLogger.shared.log("[Avatar] 未匹配到表情标记，buffer内容: \(text)")
             return (text, false)
         }
         let expression = String(text[Range(match.range(at: 1), in: text)!])
@@ -1400,10 +1398,24 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200)
                             self.js("apd('\(self.escJS(cleaned))')")
                         }
                     } else {
-                        // 没匹配到标记，直接追加内容
-                        if !content.isEmpty {
-                            self.js("apd('\(self.escJS(content))')")
+                        // 没匹配到完整标记，检查是否有不完整标记的开头
+                        // 从后往前找 [，判断是否是 [表情: 的前缀
+                        let tagPrefix = "[表情:"
+                        var safePrefix = self.expressionTagBuffer
+                        var holdPrefix = ""
+                        if let lastBracket = self.expressionTagBuffer.range(of: "[", options: .backwards) {
+                            let suffix = String(self.expressionTagBuffer[lastBracket.lowerBound...])
+                            // suffix 以 tagPrefix 开头 或 tagPrefix 以 suffix 开头 → 不完整标记
+                            if suffix.hasPrefix(tagPrefix) || tagPrefix.hasPrefix(suffix) {
+                                safePrefix = String(self.expressionTagBuffer[..<lastBracket.lowerBound])
+                                holdPrefix = suffix
+                            }
                         }
+                        // 把安全部分推到 UI，保留不完整前缀在缓冲区
+                        if !safePrefix.isEmpty {
+                            self.js("apd('\(self.escJS(safePrefix))')")
+                        }
+                        self.expressionTagBuffer = holdPrefix
                     }
                     self.streamCharCount += content.count
                     let liveTotal = self.totalPromptTokens + self.totalCompletionTokens + self.streamCharCount / 3
@@ -1488,6 +1500,16 @@ AppLogger.shared.log("[SSE] 未处理事件类型: \(type)")
 
         // 先停止 typing 动画
         js("rt()")
+
+        // Flush 表情标记缓冲区残留（流结束时还有未处理的内容）
+        if !expressionTagBuffer.isEmpty {
+            // 最后尝试匹配一次完整标记
+            let (cleaned, _) = processExpressionTag(expressionTagBuffer)
+            if !cleaned.isEmpty {
+                js("apd('\(escJS(cleaned))')")
+            }
+            expressionTagBuffer = ""
+        }
 
         let getJS = """
             (function(){
@@ -1769,6 +1791,11 @@ AppLogger.shared.log("[Warning] Message \(msgIndex) has empty content, skipping"
         AppLogger.shared.log("[Avatar] 执行 JS: \(js)")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            // 用户表情激活中，跳过所有非用户触发的覆盖（在主线程检查，消除竞态）
+            if self.userExpressionActive && !userInitiated {
+                AppLogger.shared.log("[Avatar] 用户表情激活中，主线程跳过覆盖: \(expr)")
+                return
+            }
             if userInitiated {
                 self.userExpressionActive = true  // 在主线程设置 flag，消除竞态
             }
