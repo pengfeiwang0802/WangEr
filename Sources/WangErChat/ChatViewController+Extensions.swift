@@ -60,8 +60,7 @@ AppLogger.shared.log("[File Drop] 读取文件失败: \(error)")
 // MARK: - NSTableView
 extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int {
-        if tableView == conversationTableView { return conversations.count }
-        return agents.count
+        return conversations.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -81,11 +80,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 tf.centerYAnchor.constraint(equalTo: cell!.centerYAnchor),
             ])
         }
-        if tableView == conversationTableView {
-            cell?.textField?.stringValue = conversations[safe: row]?.title ?? "会话"
-        } else {
-            cell?.textField?.stringValue = agents[safe: row]?.displayName ?? ""
-        }
+        cell?.textField?.stringValue = conversations[safe: row]?.title ?? "会话"
         return cell
     }
 
@@ -95,12 +90,6 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
         if tableView == conversationTableView {
             if row >= 0 && row < conversations.count {
                 switchToConversation(row)
-            }
-        } else if tableView == agentsTableView {
-            if row >= 0 && row < agents.count {
-                currentAgentId = agents[row].id
-                updateAgentPanel(agents[row])
-AppLogger.shared.log("Switched to agent: \(currentAgentId)")
             }
         }
     }

@@ -17,19 +17,12 @@ class ChatViewController: NSViewController {
     private let newChatButton = NSButton()
     let conversationTableView = NSTableView()
     private let conversationScrollView = NSScrollView()
-    private let agentsLabel = NSTextField()
-    private let addAgentButton = NSButton()
-    let agentsTableView = NSTableView()
-    private let agentsScrollView = NSScrollView()
     private let sidebarDivider = NSBox()
+    let avatarContainer = NSView()
+    var avatarWebView: WKWebView?
+    var avatarReady = false
 
     // Agent 参数面板
-    private let agentPanelView = NSView()
-    private let agentPanelLabel = NSTextField()
-    private let agentPanelName = NSTextField()
-    private let agentPanelModel = NSTextField()
-    private let agentPanelID = NSTextField()
-    private let agentPanelDivider = NSBox()
 
     // 聊天区
     private let webView: WKWebView = {
@@ -77,6 +70,10 @@ class ChatViewController: NSViewController {
 
     // SSE 累积缓冲区:防止 TCP 分片截断事件
     private var sseBuffer = ""
+    // 表情标记累积缓冲区(处理流式拆分)
+    private var expressionTagBuffer = ""
+    // 用户命令表情激活标志（防止 .ready 状态覆盖用户命令的表情）
+    private var userExpressionActive = false
 
     /// 当前活跃的工具调用链(用于显示嵌套工具调用)
     private var activeToolStack: [String] = []
@@ -125,7 +122,6 @@ class ChatViewController: NSViewController {
     private var currentModel = "DeepSeek V4 Flash"
     private var dsBalance: String = "--"
     private var moonshotBalance: String = "--"
-    private(set) var agents: [AgentInfo] = []
     var currentAgentId = "main"
 
     private var currentMessages: [[String: String]] {
@@ -159,7 +155,6 @@ class ChatViewController: NSViewController {
         loadChatHTML()
         // 注册 JS 消息处理
         webView.configuration.userContentController.add(self, name: "fileOpen")
-        setupAgentPanel()
         updateUsageDisplay()
         fetchBalance()
         conversationTableView.reloadData()
@@ -168,7 +163,8 @@ class ChatViewController: NSViewController {
         if conversations.count > 1 || !conversations[0].messages.isEmpty {
             switchToConversation(lastIndex)
         }
-        loadAgents()
+
+        setupAvatarView()
     }
 
     // MARK: - 主布局
@@ -221,28 +217,10 @@ class ChatViewController: NSViewController {
         sidebarDivider.boxType = .separator
         sidebarView.addSubview(sidebarDivider)
 
-        agentsLabel.translatesAutoresizingMaskIntoConstraints = false
-        agentsLabel.stringValue = "🤖 Agents"
-        agentsLabel.font = NSFont.boldSystemFont(ofSize: 13)
-        agentsLabel.isEditable = false; agentsLabel.isBordered = false; agentsLabel.backgroundColor = .clear
-        sidebarView.addSubview(agentsLabel)
-
-        addAgentButton.translatesAutoresizingMaskIntoConstraints = false
-        addAgentButton.title = "+"; addAgentButton.bezelStyle = .smallSquare
-        addAgentButton.action = #selector(addAgent); addAgentButton.target = self
-        sidebarView.addSubview(addAgentButton)
-
-        let agentCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("agent"))
-        agentCol.width = 200
-        agentsTableView.addTableColumn(agentCol)
-        agentsTableView.headerView = nil; agentsTableView.style = .plain
-        agentsTableView.rowHeight = 32; agentsTableView.backgroundColor = .clear
-        agentsTableView.selectionHighlightStyle = .sourceList
-        agentsScrollView.documentView = agentsTableView
-        agentsScrollView.hasVerticalScroller = true
-        agentsScrollView.autohidesScrollers = true
-        agentsScrollView.translatesAutoresizingMaskIntoConstraints = false
-        sidebarView.addSubview(agentsScrollView)
+        avatarContainer.translatesAutoresizingMaskIntoConstraints = false
+        avatarContainer.wantsLayer = true
+        avatarContainer.layer?.backgroundColor = NSColor.lightGray.cgColor
+        sidebarView.addSubview(avatarContainer)
 
         NSLayoutConstraint.activate([
             conversationLabel.topAnchor.constraint(equalTo: sidebarView.topAnchor, constant: 12),
@@ -258,22 +236,14 @@ class ChatViewController: NSViewController {
             sidebarDivider.topAnchor.constraint(equalTo: conversationScrollView.bottomAnchor, constant: 4),
             sidebarDivider.leadingAnchor.constraint(equalTo: sidebarView.leadingAnchor, constant: 8),
             sidebarDivider.trailingAnchor.constraint(equalTo: sidebarView.trailingAnchor, constant: -8),
-            agentsLabel.topAnchor.constraint(equalTo: sidebarDivider.bottomAnchor, constant: 8),
-            agentsLabel.leadingAnchor.constraint(equalTo: sidebarView.leadingAnchor, constant: 12),
-            agentsLabel.trailingAnchor.constraint(equalTo: addAgentButton.leadingAnchor, constant: -4),
-            addAgentButton.centerYAnchor.constraint(equalTo: agentsLabel.centerYAnchor),
-            addAgentButton.trailingAnchor.constraint(equalTo: sidebarView.trailingAnchor, constant: -8),
-            addAgentButton.widthAnchor.constraint(equalToConstant: 24), addAgentButton.heightAnchor.constraint(equalToConstant: 24),
-            agentsScrollView.topAnchor.constraint(equalTo: agentsLabel.bottomAnchor, constant: 6),
-            agentsScrollView.leadingAnchor.constraint(equalTo: sidebarView.leadingAnchor),
-            agentsScrollView.trailingAnchor.constraint(equalTo: sidebarView.trailingAnchor),
-            agentsScrollView.bottomAnchor.constraint(equalTo: sidebarView.bottomAnchor),
+            avatarContainer.topAnchor.constraint(equalTo: sidebarDivider.bottomAnchor, constant: 8),
+            avatarContainer.leadingAnchor.constraint(equalTo: sidebarView.leadingAnchor, constant: 8),
+            avatarContainer.trailingAnchor.constraint(equalTo: sidebarView.trailingAnchor, constant: -8),
+            avatarContainer.bottomAnchor.constraint(equalTo: sidebarView.bottomAnchor, constant: -8),
         ])
 
         conversationTableView.dataSource = self; conversationTableView.delegate = self
         conversationTableView.doubleAction = #selector(doubleClickConversation)
-        agentsTableView.dataSource = self; agentsTableView.delegate = self
-        setupAgentPanel()
     }
 
     // MARK: - 顶部工具栏
@@ -460,6 +430,39 @@ class ChatViewController: NSViewController {
 
         // 更新步骤指示器
         updateStepIndicator(for: priority, text: text)
+
+        // 同步更新虚拟形象表情
+        updateAvatarExpression(for: priority)
+    }
+
+    /// 根据状态优先级更新虚拟形象表情
+    private func updateAvatarExpression(for priority: StatusPriority) {
+        // 用户命令激活时，跳过所有自动表情（保留用户命令的表情）
+        guard !userExpressionActive else {
+            AppLogger.shared.log("[Avatar] 用户表情激活中，跳过 .\\(priority) 覆盖")
+            return
+        }
+        let expression: String
+        switch priority {
+        case .ready:
+            expression = "happy"
+        case .generating:
+            expression = "happy"
+        case .thinking:
+            expression = "thinking"
+        case .toolCall:
+            expression = "thinking"
+        case .reasoning:
+            expression = "thinking"
+        }
+        setAvatarExpression(expression)
+        // 同步状态文本（去掉 emoji 前缀，保留文字部分）
+        let statusText = statusLabel.stringValue
+        if let range = statusText.range(of: " ") {
+            setAvatarStatus(String(statusText[range.upperBound...]))
+        } else {
+            setAvatarStatus(statusText)
+        }
     }
 
     /// 根据优先级更新步骤指示器
@@ -609,67 +612,7 @@ class ChatViewController: NSViewController {
 
 
 
-    private func loadAgents() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
 
-            let pipe = Pipe()
-            let errorPipe = Pipe()
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/bin/bash")
-            task.arguments = ["-c", "/usr/local/bin/openclaw agents list --json 2>/dev/null || echo '[]'"]
-            task.standardOutput = pipe
-            task.standardError = errorPipe
-
-            do {
-                try task.run()
-                // 使用 5 秒超时,避免阻塞主线程
-                let timeout = DispatchTime.now() + .seconds(5)
-                DispatchQueue.global().asyncAfter(deadline: timeout) {
-                    if task.isRunning {
-                        task.terminate()
-AppLogger.shared.log("[loadAgents] 命令超时,已终止")
-                    }
-                }
-                task.waitUntilExit()
-
-                // 检查命令执行是否成功
-                if task.terminationStatus != 0 {
-                    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errorOutput = String(data: errorData, encoding: .utf8) ?? "未知错误"
-AppLogger.shared.log("[loadAgents] 命令失败 (exit \(task.terminationStatus)): \(errorOutput)")
-                    throw NSError(domain: "WangErChat", code: Int(task.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorOutput])
-                }
-
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                if let list = try? JSONDecoder().decode([AgentInfo].self, from: data), !list.isEmpty {
-                    DispatchQueue.main.async {
-                        self.agents = list
-                        self.agentsTableView.reloadData()
-                        if let idx = list.firstIndex(where: { $0.isDefault == true || $0.id == "main" }) {
-                            self.agentsTableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-                        }
-                    }
-                } else {
-                    let output = String(data: data, encoding: .utf8) ?? ""
-AppLogger.shared.log("[loadAgents] 解析失败或空列表,原始输出: \(output.prefix(200))")
-                    DispatchQueue.main.async {
-                        self.agents = [AgentInfo(id: "main", identityName: "王二(你)", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
-                        self.agentsTableView.reloadData()
-                        self.agentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-                    }
-                }
-            } catch {
-AppLogger.shared.log("[loadAgents] 错误: \(error)")
-                DispatchQueue.main.async { [weak self] in
-                    self?.agents = [AgentInfo(id: "main", identityName: "王二(你)", identityEmoji: "🤖", model: nil, workspace: nil, isDefault: true)]
-                    self?.agentsTableView.reloadData()
-                    self?.agentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-                    self?.statusLabel.stringValue = "⚠️ Agents 加载失败"
-                }
-            }
-        }
-    }
 
     private func fetchBalance() {
         // 查 DeepSeek 余额
@@ -946,79 +889,6 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
         dropTargetView.isHidden = true
     }
 
-    // MARK: - Agent 参数面板
-    private func setupAgentPanel() {
-        agentPanelView.translatesAutoresizingMaskIntoConstraints = false
-        sidebarView.addSubview(agentPanelView)
-
-        // 分割线
-        let divider = NSBox()  // local scope
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        divider.boxType = .separator
-        agentPanelView.addSubview(divider)
-
-        agentPanelLabel.translatesAutoresizingMaskIntoConstraints = false
-        agentPanelLabel.stringValue = "📋 Agent 参数"
-        agentPanelLabel.font = NSFont.boldSystemFont(ofSize: 13)
-        agentPanelLabel.isEditable = false; agentPanelLabel.isBordered = false; agentPanelLabel.backgroundColor = .clear
-        agentPanelView.addSubview(agentPanelLabel)
-
-        agentPanelName.translatesAutoresizingMaskIntoConstraints = false
-        agentPanelName.font = NSFont.systemFont(ofSize: 12)
-        agentPanelName.isEditable = false; agentPanelName.isBordered = false; agentPanelName.backgroundColor = .clear
-        agentPanelView.addSubview(agentPanelName)
-
-        agentPanelID.translatesAutoresizingMaskIntoConstraints = false
-        agentPanelID.font = NSFont.systemFont(ofSize: 11)
-        agentPanelID.textColor = .secondaryLabelColor
-        agentPanelID.isEditable = false; agentPanelID.isBordered = false; agentPanelID.backgroundColor = .clear
-        agentPanelView.addSubview(agentPanelID)
-
-        agentPanelModel.translatesAutoresizingMaskIntoConstraints = false
-        agentPanelModel.font = NSFont.systemFont(ofSize: 11)
-        agentPanelModel.textColor = .secondaryLabelColor
-        agentPanelModel.isEditable = false; agentPanelModel.isBordered = false; agentPanelModel.backgroundColor = .clear
-        agentPanelView.addSubview(agentPanelModel)
-
-        NSLayoutConstraint.activate([
-            // Panel itself pinned to bottom of sidebar
-            agentPanelView.leadingAnchor.constraint(equalTo: sidebarView.leadingAnchor),
-            agentPanelView.trailingAnchor.constraint(equalTo: sidebarView.trailingAnchor),
-            agentPanelView.bottomAnchor.constraint(equalTo: sidebarView.bottomAnchor),
-            agentPanelView.heightAnchor.constraint(equalToConstant: 90),
-
-            // Divider at top of panel
-            divider.topAnchor.constraint(equalTo: agentPanelView.topAnchor),
-            divider.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 8),
-            divider.trailingAnchor.constraint(equalTo: agentPanelView.trailingAnchor, constant: -8),
-
-            // Label
-            agentPanelLabel.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 6),
-            agentPanelLabel.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 12),
-
-            // Name
-            agentPanelName.topAnchor.constraint(equalTo: agentPanelLabel.bottomAnchor, constant: 4),
-            agentPanelName.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 12),
-            agentPanelName.trailingAnchor.constraint(equalTo: agentPanelView.trailingAnchor, constant: -12),
-
-            // ID
-            agentPanelID.topAnchor.constraint(equalTo: agentPanelName.bottomAnchor, constant: 2),
-            agentPanelID.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 12),
-            agentPanelID.trailingAnchor.constraint(equalTo: agentPanelView.trailingAnchor, constant: -12),
-
-            // Model
-            agentPanelModel.topAnchor.constraint(equalTo: agentPanelID.bottomAnchor, constant: 2),
-            agentPanelModel.leadingAnchor.constraint(equalTo: agentPanelView.leadingAnchor, constant: 12),
-            agentPanelModel.trailingAnchor.constraint(equalTo: agentPanelView.trailingAnchor, constant: -12),
-        ])
-    }
-
-    func updateAgentPanel(_ agent: AgentInfo) {
-        agentPanelName.stringValue = agent.displayName
-        agentPanelID.stringValue = "ID: \(agent.id)"
-        agentPanelModel.stringValue = "🖥 模型: \(agent.model ?? "默认")"
-    }
-
     func saveConversations() {
         do {
             let data = try JSONEncoder().encode(conversations)
@@ -1076,14 +946,7 @@ AppLogger.shared.log("[loadConversations] 读取会话文件失败: \(error)")
         switchToConversation(newIndex)
         saveConversations()
     }
-    @objc func addAgent() {
-        let alert = NSAlert()
-        alert.messageText = "添加 Agent"
-        alert.informativeText = "此功能尚未实现,敬请期待。"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "确定")
-        alert.runModal()
-    }
+
     @objc func showSettings() {
         let alert = NSAlert()
         alert.messageText = "设置"
@@ -1123,6 +986,7 @@ extension ChatViewController: NSTextViewDelegate {
         let text = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isGenerating else { return }
         textView.string = ""
+        userExpressionActive = false  // 新消息发送时重置，允许下次 .ready 恢复默认表情
         currentMessages.append(["role": "user", "content": text])
         js("addMessage('user','\(escJS(text))')")
         sendStreamToGateway(text)
@@ -1227,10 +1091,21 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
         let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
 
+        // 虚拟形象控制指令 — 告诉大模型它有虚拟形象，可以控制表情
+        let avatarInstruction = "你有一个虚拟形象（二次元风格、大眼睛、双马尾的女生），它代表你的视觉呈现。" +
+            "当用户想让你做表情时（例如「你笑一下」「做个鬼脸」「委屈」「开心」等），" +
+            "请在回复中嵌入一个表情标记来控制形象表情。" +
+            "支持的标记格式为 [表情:xxx]，其中 xxx 可以是：" +
+            "neutral（平静）、happy（微笑/开心）、thinking（思考）、sad（难过/委屈）、surprised（惊讶）。" +
+            "例如用户说「你笑一下」，你可以在回复中写「好的 [表情:happy]」" +
+            "标记不会显示给用户，仅用于控制形象。" +
+            "如果用户没有提到表情相关的内容，不要输出标记。"
+
         startStreamingRequest(
             body: [
                 "model": "openclaw",
                 "input": inputItems,
+                "instructions": avatarInstruction,
                 "max_output_tokens": 16384, "temperature": temperature,
                 "stream": true
             ] as [String: Any],
@@ -1385,7 +1260,26 @@ AppLogger.shared.log("[SSE Error] 无法将数据解码为 UTF-8")
         statusBar.layer?.backgroundColor = nil
     }
 
-
+    /// 检测并处理 [表情:xxx] 标记
+    /// - Returns: (移除标记后的文本, 是否匹配到标记)
+    private func processExpressionTag(_ text: String) -> (String, Bool) {
+        let pattern = #"\[表情:([a-zA-Z]+)\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else {
+            // 调试：打印 buffer 内容，看看为什么没匹配到
+            AppLogger.shared.log("[Avatar] 未匹配到表情标记，buffer内容: \(text)")
+            return (text, false)
+        }
+        let expression = String(text[Range(match.range(at: 1), in: text)!])
+        AppLogger.shared.log("[Avatar] 检测到表情标记: \(expression)，缓冲区内容: \(text)")
+        self.setAvatarExpression(expression, userInitiated: true)
+        // 移除标记，保留其他内容
+        var cleaned = text
+        if let range = Range(match.range, in: cleaned) {
+            cleaned.removeSubrange(range)
+        }
+        return (cleaned, true)
+    }
 
     /// 线程安全的 activeToolStack 操作
     private func pushTool(_ name: String) {
@@ -1494,7 +1388,23 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200)
 
             case "response.output_text.delta":
                 if let content = j["delta"] as? String {
-                    self.js("apd('\(self.escJS(content))')")
+                    // 累积到缓冲区，处理流式拆分
+                    self.expressionTagBuffer += content
+                    // 对整个缓冲区检测 [表情:xxx] 标记
+                    let (cleaned, matched) = self.processExpressionTag(self.expressionTagBuffer)
+                    if matched {
+                        // 匹配成功，更新缓冲区为清理后的内容
+                        self.expressionTagBuffer = cleaned
+                        // 把清理后的内容追加到 UI
+                        if !cleaned.isEmpty {
+                            self.js("apd('\(self.escJS(cleaned))')")
+                        }
+                    } else {
+                        // 没匹配到标记，直接追加内容
+                        if !content.isEmpty {
+                            self.js("apd('\(self.escJS(content))')")
+                        }
+                    }
                     self.streamCharCount += content.count
                     let liveTotal = self.totalPromptTokens + self.totalCompletionTokens + self.streamCharCount / 3
                     self.tokenLabel.stringValue = "⚡ \(formatNumber(self.totalPromptTokens)) + \(formatNumber(self.totalCompletionTokens + self.streamCharCount / 3)) = \(formatNumber(liveTotal)) tok"
@@ -1812,6 +1722,104 @@ AppLogger.shared.log("[Warning] Message \(msgIndex) has empty content, skipping"
                     self.js("addMessage('\(self.escJS(role))','\(self.escJS(content))')")
                 }
             }
+        }
+    }
+
+    // MARK: - 虚拟形象
+
+    private func setupAvatarView() {
+        let config = WKWebViewConfiguration()
+        let userContent = WKUserContentController()
+        config.userContentController = userContent
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.navigationDelegate = self
+        avatarContainer.addSubview(webView)
+        NSLayoutConstraint.activate([
+            webView.topAnchor.constraint(equalTo: avatarContainer.topAnchor),
+            webView.leadingAnchor.constraint(equalTo: avatarContainer.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: avatarContainer.trailingAnchor),
+            webView.bottomAnchor.constraint(equalTo: avatarContainer.bottomAnchor),
+        ])
+        avatarWebView = webView
+        avatarReady = false
+        webView.loadHTMLString(AvatarHTML.template, baseURL: nil)
+    }
+
+    func avatarDidLoad() {
+        avatarReady = true
+        AppLogger.shared.log("[Avatar] avatarDidLoad 被调用")
+        // 先验证 SVG 结构
+        avatarWebView?.evaluateJavaScript("document.getElementById('eyes')?.getAttribute('d') ?? 'NOT_FOUND'") { eyes, _ in
+            AppLogger.shared.log("[Avatar] 初始 - eyes path: \(eyes ?? "nil")")
+        }
+        avatarWebView?.evaluateJavaScript("document.getElementById('mouth')?.getAttribute('d') ?? 'NOT_FOUND'") { mouth, _ in
+            AppLogger.shared.log("[Avatar] 初始 - mouth path: \(mouth ?? "nil")")
+        }
+        // 再设置表情（默认 neutral）
+        avatarWebView?.evaluateJavaScript("setExpression('neutral')")
+    }
+
+    /// 通过 JS 桥接设置表情
+    func setAvatarExpression(_ expr: String, userInitiated: Bool = false) {
+        AppLogger.shared.log("[Avatar] setAvatarExpression 被调用: \(expr), avatarReady=\(avatarReady), userInitiated=\(userInitiated)")
+        guard avatarReady else { AppLogger.shared.log("[Avatar] avatarReady=false, 跳过"); return }
+        let js = "setExpression('\(escJS(expr))')"
+        AppLogger.shared.log("[Avatar] 执行 JS: \(js)")
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if userInitiated {
+                self.userExpressionActive = true  // 在主线程设置 flag，消除竞态
+            }
+            self.avatarWebView?.evaluateJavaScript(js) { result, error in
+                if let error = error {
+                    AppLogger.shared.log("[Avatar] JS 执行错误: \(error.localizedDescription)")
+                } else {
+                    AppLogger.shared.log("[Avatar] JS 执行成功, 返回值: \(result ?? "nil")")
+                    // 验证 SVG 状态 — 使用 SVG 中实际的 id
+                    self.avatarWebView?.evaluateJavaScript("document.getElementById('eyes')?.querySelector('ellipse')?.getAttribute('fill') ?? 'NOT_FOUND'") { eyes, _ in
+                        AppLogger.shared.log("[Avatar] 验证 - eyes fill: \(eyes ?? "nil")")
+                    }
+                    self.avatarWebView?.evaluateJavaScript("document.getElementById('mouth')?.getAttribute('d') ?? 'NOT_FOUND'") { mouth, _ in
+                        AppLogger.shared.log("[Avatar] 验证 - mouth path: \(mouth ?? "nil")")
+                    }
+                    self.avatarWebView?.evaluateJavaScript("document.getElementById('brow-l')?.getAttribute('d') ?? 'NOT_FOUND'") { brow, _ in
+                        AppLogger.shared.log("[Avatar] 验证 - brow-l path: \(brow ?? "nil")")
+                    }
+                    self.avatarWebView?.evaluateJavaScript("document.getElementById('brow-r')?.getAttribute('d') ?? 'NOT_FOUND'") { brow, _ in
+                        AppLogger.shared.log("[Avatar] 验证 - brow-r path: \(brow ?? "nil")")
+                    }
+                    self.avatarWebView?.evaluateJavaScript("document.getElementById('blush-l')?.getAttribute('opacity') ?? 'NOT_FOUND'") { blush, _ in
+                        AppLogger.shared.log("[Avatar] 验证 - blush-l opacity: \(blush ?? "nil")")
+                    }
+                    self.avatarWebView?.evaluateJavaScript("document.getElementById('blush-r')?.getAttribute('opacity') ?? 'NOT_FOUND'") { blush, _ in
+                        AppLogger.shared.log("[Avatar] 验证 - blush-r opacity: \(blush ?? "nil")")
+                    }
+                }
+            }
+        }
+    }
+
+    /// 通过 JS 桥接设置状态文本
+    func setAvatarStatus(_ text: String) {
+        guard avatarReady else { return }
+        let js = "setStatus('\(escJS(text))')"
+        DispatchQueue.main.async { [weak self] in
+            self?.avatarWebView?.evaluateJavaScript(js)
+        }
+    }
+
+    /// 通过 JS 桥接替换整个 SVG 内容（用于 AI 生成或模板切换）
+    func loadAvatarSVG(_ svgContent: String) {
+        guard avatarReady else { return }
+        let escaped = svgContent
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: "")
+        let js = "loadSVG('\(escaped)')"
+        DispatchQueue.main.async { [weak self] in
+            self?.avatarWebView?.evaluateJavaScript(js)
         }
     }
 }
