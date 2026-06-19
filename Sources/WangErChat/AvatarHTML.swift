@@ -88,8 +88,8 @@ enum AvatarHTML {
           neutral: {
             'brow-l':  'M65,90 Q78,85 90,90',
             'brow-r':  'M110,90 Q122,85 135,90',
-            'mouth':   'M85,135 Q100,150 115,135',
-            'blush-opacity': '0.4',
+            'mouth':   'M85,138 L115,138',
+            'blush-opacity': '0.2',
             'blinking': true
           },
           happy: {

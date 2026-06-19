@@ -19,8 +19,9 @@ class ChatViewController: NSViewController {
     private let conversationScrollView = NSScrollView()
     private let sidebarDivider = NSBox()
     let avatarContainer = NSView()
-    var avatarWebView: WKWebView?
-    var avatarReady = false
+    private lazy var avatarManager: AvatarManager = {
+        return AvatarManager(containerView: avatarContainer)
+    }()
 
     // Agent 参数面板
 
@@ -60,20 +61,13 @@ class ChatViewController: NSViewController {
     private var currentConversationIndex = 0
     private var isGenerating = false
     private var isFinalizing = false // 幂等锁:防止 finalize 被多次调用
-    private var currentStreamTask: URLSessionDataTask?
-    private var currentURLSession: URLSession?  // 用于复用和清理
+    private var streamSession: StreamSession?
     private var safetyTimer: Timer?
     private var totalPromptTokens = 0
     private var totalCompletionTokens = 0
     private var streamCharCount = 0
     private var jsErrorCount = 0  // JS 连续异常计数,超阈值触发 WebView 重新加载
 
-    // SSE 累积缓冲区:防止 TCP 分片截断事件
-    private var sseBuffer = ""
-    // 表情标记累积缓冲区(处理流式拆分)
-    private var expressionTagBuffer = ""
-    // 用户命令表情激活标志（防止 .ready 状态覆盖用户命令的表情）
-    private var userExpressionActive = false
 
     /// 当前活跃的工具调用链(用于显示嵌套工具调用)
     private var activeToolStack: [String] = []
@@ -164,7 +158,7 @@ class ChatViewController: NSViewController {
             switchToConversation(lastIndex)
         }
 
-        setupAvatarView()
+        avatarManager.setup()
     }
 
     // MARK: - 主布局
@@ -438,7 +432,7 @@ class ChatViewController: NSViewController {
     /// 根据状态优先级更新虚拟形象表情
     private func updateAvatarExpression(for priority: StatusPriority) {
         // 用户命令激活时，跳过所有自动表情（保留用户命令的表情）
-        guard !userExpressionActive else {
+        guard !avatarManager.userExpressionActive else {
             AppLogger.shared.log("[Avatar] 用户表情激活中，跳过 .\\(priority) 覆盖")
             return
         }
@@ -455,13 +449,13 @@ class ChatViewController: NSViewController {
         case .reasoning:
             expression = "thinking"
         }
-        setAvatarExpression(expression)
+        avatarManager.setExpression(expression)
         // 同步状态文本（去掉 emoji 前缀，保留文字部分）
         let statusText = statusLabel.stringValue
         if let range = statusText.range(of: " ") {
-            setAvatarStatus(String(statusText[range.upperBound...]))
+            avatarManager.setStatus(String(statusText[range.upperBound...]))
         } else {
-            setAvatarStatus(statusText)
+            avatarManager.setStatus(statusText)
         }
     }
 
@@ -986,7 +980,14 @@ extension ChatViewController: NSTextViewDelegate {
         let text = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isGenerating else { return }
         textView.string = ""
-        userExpressionActive = false  // 新消息发送时重置，允许下次 .ready 恢复默认表情
+        avatarManager.userExpressionActive = false  // 新消息发送时重置，允许下次 .ready 恢复默认表情
+
+        // 解析用户输入中的表情关键词，立即触发 avatar 表情变化
+        if let expression = AvatarManager.parseExpression(from: text) {
+            AppLogger.shared.log("[Avatar] 用户关键词触发表情: \(expression)")
+            avatarManager.setExpression(expression, userInitiated: true)
+        }
+
         currentMessages.append(["role": "user", "content": text])
         js("addMessage('user','\(escJS(text))')")
         sendStreamToGateway(text)
@@ -995,8 +996,8 @@ extension ChatViewController: NSTextViewDelegate {
     @objc func sendMessage() { send() }
 
     @objc func stopGeneration() {
-        currentStreamTask?.cancel(); currentStreamTask = nil
-        currentURLSession?.invalidateAndCancel(); currentURLSession = nil
+        streamSession?.cancel()
+        streamSession = nil
         if isGenerating && !isFinalizing {
             js("fin()")
             finalizeAndUpdateStats()
@@ -1008,8 +1009,8 @@ extension ChatViewController: NSTextViewDelegate {
         DispatchQueue.main.async {
             self.safetyTimer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: false) { [weak self] _ in
                 guard let self = self, self.isGenerating else { return }
-                self.currentStreamTask?.cancel()
-                self.currentStreamTask = nil
+                self.streamSession?.cancel()
+                self.streamSession = nil
                 self.js("rt()")
                 self.js("addMessage('assistant','⚠️ 生成超时(30分钟),已自动中断')")
                 self.stopGenerating()
@@ -1038,37 +1039,14 @@ extension ChatViewController: NSTextViewDelegate {
         showStepIndicator(icon: statusIcon, text: statusText, progress: 10)
         js("at()")
         resetSafetyTimer()
-        sseBuffer = ""
-
-        var req = URLRequest(url: URL(string: "\(AppConfig.gatewayURL)/v1/responses")!)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("Bearer \(AppConfig.gatewayToken)", forHTTPHeaderField: "Authorization")
-        req.setValue(currentAgentId, forHTTPHeaderField: "x-openclaw-agent-id")
 
         let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
 AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedModel)")
-        req.setValue(mappedModel, forHTTPHeaderField: "x-openclaw-model")
 
-        do {
-            req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        } catch {
-            DispatchQueue.main.async {
-                self.js("addMessage('assistant','❌ 请求构造失败')")
-                self.stopGenerating()
-            }
-            return
-        }
-
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 1860
-        config.timeoutIntervalForResource = 3600
-
-        currentURLSession?.invalidateAndCancel()
-        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-        currentURLSession = session
-        let task = session.dataTask(with: req)
-        currentStreamTask = task; task.resume()
+        let session = StreamSession()
+        session.delegate = self
+        session.start(body: body, gatewayURL: AppConfig.gatewayURL, token: AppConfig.gatewayToken, agentId: currentAgentId, model: mappedModel)
+        streamSession = session
     }
 
     private func sendStreamToGateway(_ text: String) {
@@ -1091,21 +1069,10 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
         let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
 
-        // 虚拟形象控制指令 — 告诉大模型它有虚拟形象，可以控制表情
-        let avatarInstruction = "你有一个虚拟形象（二次元风格、大眼睛、双马尾的女生），它代表你的视觉呈现。" +
-            "当用户想让你做表情时（例如「你笑一下」「做个鬼脸」「委屈」「开心」等），" +
-            "请在回复中嵌入一个表情标记来控制形象表情。" +
-            "支持的标记格式为 [表情:xxx]，其中 xxx 可以是：" +
-            "neutral（平静）、happy（微笑/开心）、thinking（思考）、sad（难过/委屈）、surprised（惊讶）。" +
-            "例如用户说「你笑一下」，你可以在回复中写「好的 [表情:happy]」" +
-            "标记不会显示给用户，仅用于控制形象。" +
-            "如果用户没有提到表情相关的内容，不要输出标记。"
-
         startStreamingRequest(
             body: [
                 "model": "openclaw",
                 "input": inputItems,
-                "instructions": avatarInstruction,
                 "max_output_tokens": 16384, "temperature": temperature,
                 "stream": true
             ] as [String: Any],
@@ -1163,92 +1130,8 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
     }
 }
 
-// MARK: - Streaming SSE (OpenResponses)
-extension ChatViewController: URLSessionDataDelegate {
-    // MARK: - HTTP 响应检查
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        guard let httpResponse = response as? HTTPURLResponse else {
-            completionHandler(.allow)
-            return
-        }
-
-        if httpResponse.statusCode != 200 {
-            AppLogger.shared.log("[HTTP Error] 状态码: \(httpResponse.statusCode)")
-            // 不阻止接收,但标记错误状态,后续 didReceive data 中会检查
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                // 显示错误状态
-                self.setStatusForce("❌ HTTP \(httpResponse.statusCode)", priority: .ready)
-                self.hideStepIndicator()
-
-                // 在聊天区显示错误
-                let errorMsg = "⚠️ Gateway 返回 HTTP \(httpResponse.statusCode)\n模型可能未在 Gateway 中注册,或 API Key 无效。"
-                self.js("addMessage('assistant','\(self.escJS(errorMsg))')")
-            }
-        }
-
-        completionHandler(.allow)
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        guard !data.isEmpty else { return }
-        guard let chunk = String(data: data, encoding: .utf8) else {
-AppLogger.shared.log("[SSE Error] 无法将数据解码为 UTF-8")
-            DispatchQueue.main.async {
-                self.js("addMessage('assistant','❌ 接收数据解码失败')")
-                self.finalizeAndUpdateStats()
-            }
-            return
-        }
-
-        // 追加到累积缓冲区
-        sseBuffer += chunk
-
-        // 按 \n\n 分割完整事件块
-        let blocks = sseBuffer.components(separatedBy: "\n\n")
-        // 最后一段可能是不完整的,留在缓冲区等待下一批
-        if sseBuffer.hasSuffix("\n\n") {
-            sseBuffer = ""
-        } else {
-            sseBuffer = blocks.last ?? ""
-        }
-
-        // 处理完整的块(排除最后一个不完整的)
-        let completeBlocks = blocks.dropLast(blocks.count > 1 && !sseBuffer.isEmpty ? 1 : 0)
-
-        var foundDone = false
-
-        for block in completeBlocks {
-            let trimmed = block.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-
-            let lines = trimmed.components(separatedBy: "\n")
-            var currentEvent = ""
-            var currentData = ""
-
-            for line in lines {
-                if line.hasPrefix("event: ") {
-                    currentEvent = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
-                } else if line.hasPrefix("data: ") {
-                    currentData = String(line.dropFirst(6)).trimmingCharacters(in: .whitespaces)
-                }
-            }
-
-            if currentData == "[DONE]" {
-                foundDone = true
-                break
-            }
-
-            if !currentData.isEmpty {
-                processResponsesEvent(event: currentEvent, data: currentData)
-            }
-        }
-
-        if foundDone {
-            DispatchQueue.main.async { self.finalizeAndUpdateStats() }
-            return
-        }
-    }
+// MARK: - SSE 事件处理 (URLSession 委托已移至 StreamSession)
+extension ChatViewController {
 
     /// 设置状态栏颜色
     private func setStatusBarColor(_ color: NSColor, alpha: CGFloat = 0.12) {
@@ -1258,25 +1141,6 @@ AppLogger.shared.log("[SSE Error] 无法将数据解码为 UTF-8")
     /// 重置状态栏颜色
     private func resetStatusBarColor() {
         statusBar.layer?.backgroundColor = nil
-    }
-
-    /// 检测并处理 [表情:xxx] 标记
-    /// - Returns: (移除标记后的文本, 是否匹配到标记)
-    private func processExpressionTag(_ text: String) -> (String, Bool) {
-        let pattern = #"\[表情:([a-zA-Z]+)\]"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else {
-            return (text, false)
-        }
-        let expression = String(text[Range(match.range(at: 1), in: text)!])
-        AppLogger.shared.log("[Avatar] 检测到表情标记: \(expression)，缓冲区内容: \(text)")
-        self.setAvatarExpression(expression, userInitiated: true)
-        // 移除标记，保留其他内容
-        var cleaned = text
-        if let range = Range(match.range, in: cleaned) {
-            cleaned.removeSubrange(range)
-        }
-        return (cleaned, true)
     }
 
     /// 线程安全的 activeToolStack 操作
@@ -1301,27 +1165,12 @@ AppLogger.shared.log("[SSE Error] 无法将数据解码为 UTF-8")
         statusLabel.needsDisplay = true
     }
 
-    private func processResponsesEvent(event: String, data: String) {
-        guard !data.isEmpty else { return }
-
-        guard let d = data.data(using: .utf8) else {
-AppLogger.shared.log("[SSE Error] 无法将 event data 转为 Data")
+    /// 处理已解析的 SSE 事件（从 StreamSession 回调,已在主线程）
+    private func processResponsesEvent(event: String, json: [String: Any]) {
+        guard let type = json["type"] as? String else {
+AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段")
             return
         }
-
-        guard let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
-AppLogger.shared.log("[SSE Error] JSON 解析失败: \(data.prefix(200))")
-            return
-        }
-
-        guard let type = j["type"] as? String else {
-AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200))")
-            return
-        }
-
-        // 整个事件处理必须在主线程,确保数据安全
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
 
             // 方案1&3: 使用增强状态系统
             switch type {
@@ -1336,7 +1185,7 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200)
                 self.startStatusIconAnimation(icons: self.thinkingIcons)
 
             case "response.output_item.added":
-                if let item = j["item"] as? [String: Any], item["type"] as? String == "function_call" {
+                if let item = json["item"] as? [String: Any], item["type"] as? String == "function_call" {
                     let name = item["name"] as? String ?? ""
                     let args = item["arguments"] as? [String: Any]
                     let friendlyName = friendlyToolName(name)
@@ -1352,7 +1201,7 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200)
                     self.setStatusAdvanced(statusText, priority: .toolCall, color: .systemOrange, alpha: 0.50)
                     self.showStepIndicator(icon: "🔧", text: "正在调用 \(friendlyName)...", progress: 50)
                     self.startStatusIconAnimation(icons: self.toolIcons)
-                } else if let item = j["item"] as? [String: Any], item["type"] as? String == "reasoning" {
+                } else if let item = json["item"] as? [String: Any], item["type"] as? String == "reasoning" {
                     self.setStatusAdvanced("🧠 深度思考...", priority: .reasoning, color: .systemPurple, alpha: 0.45)
                     self.showStepIndicator(icon: "🧠", text: "深度推理中...", progress: 40)
                 } else {
@@ -1361,18 +1210,18 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200)
                 }
 
             case "response.content_part.added":
-                if let part = j["part"] as? [String: Any], part["type"] as? String == "text" {
+                if let part = json["part"] as? [String: Any], part["type"] as? String == "text" {
                     self.setStatusAdvanced("✍️ 准备输出...", priority: .generating, color: .systemGreen, alpha: 0.35)
                     self.showStepIndicator(icon: "✍️", text: "准备输出内容...", progress: 60)
                 }
 
             case "response.function_call_arguments.delta":
-                if let delta = j["delta"] as? String, !delta.isEmpty {
+                if let delta = json["delta"] as? String, !delta.isEmpty {
                     self.setStatusAdvanced("🔧 参数输入中...", priority: .toolCall, color: .systemOrange, alpha: 0.50)
                 }
 
             case "response.function_call_arguments.done":
-                if let name = j["name"] as? String {
+                if let name = json["name"] as? String {
                     let friendlyName = friendlyToolName(name)
                     self.setStatusAdvanced("✅ 参数就绪: \(friendlyName)", priority: .toolCall, color: .systemOrange, alpha: 0.35)
                 }
@@ -1385,38 +1234,8 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段: \(data.prefix(200)
                 self.setStatusAdvanced("🧠 推理总结中...", priority: .reasoning, color: .systemPurple, alpha: 0.40)
 
             case "response.output_text.delta":
-                if let content = j["delta"] as? String {
-                    // 累积到缓冲区，处理流式拆分
-                    self.expressionTagBuffer += content
-                    // 对整个缓冲区检测 [表情:xxx] 标记
-                    let (cleaned, matched) = self.processExpressionTag(self.expressionTagBuffer)
-                    if matched {
-                        // 匹配成功，更新缓冲区为清理后的内容
-                        self.expressionTagBuffer = cleaned
-                        // 把清理后的内容追加到 UI
-                        if !cleaned.isEmpty {
-                            self.js("apd('\(self.escJS(cleaned))')")
-                        }
-                    } else {
-                        // 没匹配到完整标记，检查是否有不完整标记的开头
-                        // 从后往前找 [，判断是否是 [表情: 的前缀
-                        let tagPrefix = "[表情:"
-                        var safePrefix = self.expressionTagBuffer
-                        var holdPrefix = ""
-                        if let lastBracket = self.expressionTagBuffer.range(of: "[", options: .backwards) {
-                            let suffix = String(self.expressionTagBuffer[lastBracket.lowerBound...])
-                            // suffix 以 tagPrefix 开头 或 tagPrefix 以 suffix 开头 → 不完整标记
-                            if suffix.hasPrefix(tagPrefix) || tagPrefix.hasPrefix(suffix) {
-                                safePrefix = String(self.expressionTagBuffer[..<lastBracket.lowerBound])
-                                holdPrefix = suffix
-                            }
-                        }
-                        // 把安全部分推到 UI，保留不完整前缀在缓冲区
-                        if !safePrefix.isEmpty {
-                            self.js("apd('\(self.escJS(safePrefix))')")
-                        }
-                        self.expressionTagBuffer = holdPrefix
-                    }
+                if let content = json["delta"] as? String {
+                    self.js("apd('\(self.escJS(content))')")
                     self.streamCharCount += content.count
                     let liveTotal = self.totalPromptTokens + self.totalCompletionTokens + self.streamCharCount / 3
                     self.tokenLabel.stringValue = "⚡ \(formatNumber(self.totalPromptTokens)) + \(formatNumber(self.totalCompletionTokens + self.streamCharCount / 3)) = \(formatNumber(liveTotal)) tok"
@@ -1432,7 +1251,7 @@ AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
                 self.showStepIndicator(icon: "✅", text: "回复生成完成", progress: 100)
 
             case "response.content_part.done":
-                if let part = j["part"] as? [String: Any] {
+                if let part = json["part"] as? [String: Any] {
                     if part["type"] as? String == "function_call" {
                         let name = part["name"] as? String ?? ""
                         let friendlyName = friendlyToolName(name)
@@ -1444,7 +1263,7 @@ AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
                 }
 
             case "response.output_item.done":
-                if let item = j["item"] as? [String: Any] {
+                if let item = json["item"] as? [String: Any] {
                     if item["type"] as? String == "function_call" {
                         let name = item["name"] as? String ?? ""
                         let friendlyName = friendlyToolName(name)
@@ -1463,7 +1282,7 @@ AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
                 }
 
             case "response.completed":
-                if let resp = j["response"] as? [String: Any], let usage = resp["usage"] as? [String: Any] {
+                if let resp = json["response"] as? [String: Any], let usage = resp["usage"] as? [String: Any] {
                     if let inputTokens = usage["input_tokens"] as? Int {
                         self.totalPromptTokens = inputTokens
                     }
@@ -1478,7 +1297,7 @@ AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.finalizeAndUpdateStats() }
 
             case "response.failed":
-                if let err = j["error"] as? [String: Any], let msg = err["message"] as? String {
+                if let err = json["error"] as? [String: Any], let msg = err["message"] as? String {
                     self.js("addMessage('assistant','❌ 错误: \(self.escJS(msg))')")
                 }
                 self.setStatusForce("❌ 请求失败", priority: .ready, color: .systemRed, alpha: 0.35)
@@ -1489,7 +1308,6 @@ AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
             default:
 AppLogger.shared.log("[SSE] 未处理事件类型: \(type)")
                 break
-            }
         }
     }
 
@@ -1500,16 +1318,6 @@ AppLogger.shared.log("[SSE] 未处理事件类型: \(type)")
 
         // 先停止 typing 动画
         js("rt()")
-
-        // Flush 表情标记缓冲区残留（流结束时还有未处理的内容）
-        if !expressionTagBuffer.isEmpty {
-            // 最后尝试匹配一次完整标记
-            let (cleaned, _) = processExpressionTag(expressionTagBuffer)
-            if !cleaned.isEmpty {
-                js("apd('\(escJS(cleaned))')")
-            }
-            expressionTagBuffer = ""
-        }
 
         let getJS = """
             (function(){
@@ -1544,34 +1352,6 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
                 self.streamCharCount = 0
                 self.fetchBalance()
                 self.stopGenerating()
-            }
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        DispatchQueue.main.async {
-            if let e = error as NSError? {
-                if e.code == NSURLErrorCancelled {
-                    AppLogger.shared.log("[Stream] 手动取消 (NSURLErrorCancelled)")
-                    return
-                }
-                AppLogger.shared.log("[Stream Error] 流中断: \(e.domain) code=\(e.code) \(e.localizedDescription)")
-                if self.isGenerating && !self.isFinalizing {
-                    self.js("addMessage('assistant','⚠️ 连接中断: \(self.escJS(e.localizedDescription))')")
-                    self.js("rt()")
-                    self.finalizeAndUpdateStats()
-                } else {
-                    AppLogger.shared.log("[Stream] 强制复位 (isGenerating=\(self.isGenerating) isFinalizing=\(self.isFinalizing))")
-                    self.stopGenerating()
-                }
-            } else if error == nil && self.isGenerating {
-                AppLogger.shared.log("[Stream] 连接正常关闭,执行兜底 finalize")
-                if !self.isFinalizing {
-                    self.finalizeAndUpdateStats()
-                } else {
-                    AppLogger.shared.log("[Stream] isFinalizing=true,直接 stopGenerating")
-                    self.stopGenerating()
-                }
             }
         }
     }
@@ -1747,107 +1527,54 @@ AppLogger.shared.log("[Warning] Message \(msgIndex) has empty content, skipping"
         }
     }
 
-    // MARK: - 虚拟形象
+}
 
-    private func setupAvatarView() {
-        let config = WKWebViewConfiguration()
-        let userContent = WKUserContentController()
-        config.userContentController = userContent
-        let webView = WKWebView(frame: .zero, configuration: config)
-        webView.translatesAutoresizingMaskIntoConstraints = false
-        webView.setValue(false, forKey: "drawsBackground")
-        webView.navigationDelegate = self
-        avatarContainer.addSubview(webView)
-        NSLayoutConstraint.activate([
-            webView.topAnchor.constraint(equalTo: avatarContainer.topAnchor),
-            webView.leadingAnchor.constraint(equalTo: avatarContainer.leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: avatarContainer.trailingAnchor),
-            webView.bottomAnchor.constraint(equalTo: avatarContainer.bottomAnchor),
-        ])
-        avatarWebView = webView
-        avatarReady = false
-        webView.loadHTMLString(AvatarHTML.template, baseURL: nil)
+// MARK: - StreamSessionDelegate
+extension ChatViewController: StreamSessionDelegate {
+    func streamSession(_ session: StreamSession, didReceiveEvent event: String, data: [String: Any]) {
+        processResponsesEvent(event: event, json: data)
     }
 
-    func avatarDidLoad() {
-        avatarReady = true
-        AppLogger.shared.log("[Avatar] avatarDidLoad 被调用")
-        // 先验证 SVG 结构
-        avatarWebView?.evaluateJavaScript("document.getElementById('eyes')?.getAttribute('d') ?? 'NOT_FOUND'") { eyes, _ in
-            AppLogger.shared.log("[Avatar] 初始 - eyes path: \(eyes ?? "nil")")
-        }
-        avatarWebView?.evaluateJavaScript("document.getElementById('mouth')?.getAttribute('d') ?? 'NOT_FOUND'") { mouth, _ in
-            AppLogger.shared.log("[Avatar] 初始 - mouth path: \(mouth ?? "nil")")
-        }
-        // 再设置表情（默认 neutral）
-        avatarWebView?.evaluateJavaScript("setExpression('neutral')")
+    func streamSessionDidReceiveDone(_ session: StreamSession) {
+        finalizeAndUpdateStats()
     }
 
-    /// 通过 JS 桥接设置表情
-    func setAvatarExpression(_ expr: String, userInitiated: Bool = false) {
-        AppLogger.shared.log("[Avatar] setAvatarExpression 被调用: \(expr), avatarReady=\(avatarReady), userInitiated=\(userInitiated)")
-        guard avatarReady else { AppLogger.shared.log("[Avatar] avatarReady=false, 跳过"); return }
-        let js = "setExpression('\(escJS(expr))')"
-        AppLogger.shared.log("[Avatar] 执行 JS: \(js)")
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            // 用户表情激活中，跳过所有非用户触发的覆盖（在主线程检查，消除竞态）
-            if self.userExpressionActive && !userInitiated {
-                AppLogger.shared.log("[Avatar] 用户表情激活中，主线程跳过覆盖: \(expr)")
+    func streamSession(_ session: StreamSession, didEncounterHTTPError code: Int) {
+        setStatusForce("❌ HTTP \(code)", priority: .ready)
+        hideStepIndicator()
+        let errorMsg = "⚠️ Gateway 返回 HTTP \(code)\n模型可能未在 Gateway 中注册,或 API Key 无效。"
+        js("addMessage('assistant','\(escJS(errorMsg))')")
+    }
+
+    func streamSession(_ session: StreamSession, didCompleteWithError error: Error?) {
+        if let e = error as NSError? {
+            if e.code == NSURLErrorCancelled {
+                AppLogger.shared.log("[Stream] 手动取消 (NSURLErrorCancelled)")
                 return
             }
-            if userInitiated {
-                self.userExpressionActive = true  // 在主线程设置 flag，消除竞态
+            AppLogger.shared.log("[Stream Error] 流中断: \(e.domain) code=\(e.code) \(e.localizedDescription)")
+            if isGenerating && !isFinalizing {
+                js("addMessage('assistant','⚠️ 连接中断: \(escJS(e.localizedDescription))')")
+                js("rt()")
+                finalizeAndUpdateStats()
+            } else {
+                AppLogger.shared.log("[Stream] 强制复位 (isGenerating=\(isGenerating) isFinalizing=\(isFinalizing))")
+                stopGenerating()
             }
-            self.avatarWebView?.evaluateJavaScript(js) { result, error in
-                if let error = error {
-                    AppLogger.shared.log("[Avatar] JS 执行错误: \(error.localizedDescription)")
-                } else {
-                    AppLogger.shared.log("[Avatar] JS 执行成功, 返回值: \(result ?? "nil")")
-                    // 验证 SVG 状态 — 使用 SVG 中实际的 id
-                    self.avatarWebView?.evaluateJavaScript("document.getElementById('eyes')?.querySelector('ellipse')?.getAttribute('fill') ?? 'NOT_FOUND'") { eyes, _ in
-                        AppLogger.shared.log("[Avatar] 验证 - eyes fill: \(eyes ?? "nil")")
-                    }
-                    self.avatarWebView?.evaluateJavaScript("document.getElementById('mouth')?.getAttribute('d') ?? 'NOT_FOUND'") { mouth, _ in
-                        AppLogger.shared.log("[Avatar] 验证 - mouth path: \(mouth ?? "nil")")
-                    }
-                    self.avatarWebView?.evaluateJavaScript("document.getElementById('brow-l')?.getAttribute('d') ?? 'NOT_FOUND'") { brow, _ in
-                        AppLogger.shared.log("[Avatar] 验证 - brow-l path: \(brow ?? "nil")")
-                    }
-                    self.avatarWebView?.evaluateJavaScript("document.getElementById('brow-r')?.getAttribute('d') ?? 'NOT_FOUND'") { brow, _ in
-                        AppLogger.shared.log("[Avatar] 验证 - brow-r path: \(brow ?? "nil")")
-                    }
-                    self.avatarWebView?.evaluateJavaScript("document.getElementById('blush-l')?.getAttribute('opacity') ?? 'NOT_FOUND'") { blush, _ in
-                        AppLogger.shared.log("[Avatar] 验证 - blush-l opacity: \(blush ?? "nil")")
-                    }
-                    self.avatarWebView?.evaluateJavaScript("document.getElementById('blush-r')?.getAttribute('opacity') ?? 'NOT_FOUND'") { blush, _ in
-                        AppLogger.shared.log("[Avatar] 验证 - blush-r opacity: \(blush ?? "nil")")
-                    }
-                }
+        } else if error == nil && isGenerating {
+            AppLogger.shared.log("[Stream] 连接正常关闭,执行兜底 finalize")
+            if !isFinalizing {
+                finalizeAndUpdateStats()
+            } else {
+                AppLogger.shared.log("[Stream] isFinalizing=true,直接 stopGenerating")
+                stopGenerating()
             }
         }
     }
 
-    /// 通过 JS 桥接设置状态文本
-    func setAvatarStatus(_ text: String) {
-        guard avatarReady else { return }
-        let js = "setStatus('\(escJS(text))')"
-        DispatchQueue.main.async { [weak self] in
-            self?.avatarWebView?.evaluateJavaScript(js)
-        }
-    }
-
-    /// 通过 JS 桥接替换整个 SVG 内容（用于 AI 生成或模板切换）
-    func loadAvatarSVG(_ svgContent: String) {
-        guard avatarReady else { return }
-        let escaped = svgContent
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-            .replacingOccurrences(of: "\n", with: "")
-        let js = "loadSVG('\(escaped)')"
-        DispatchQueue.main.async { [weak self] in
-            self?.avatarWebView?.evaluateJavaScript(js)
-        }
+    func streamSession(_ session: StreamSession, didEncounterDecodeError message: String) {
+        js("addMessage('assistant','❌ \(escJS(message))')")
+        finalizeAndUpdateStats()
     }
 }
 
