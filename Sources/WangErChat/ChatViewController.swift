@@ -11,6 +11,7 @@ class ChatViewController: NSViewController {
     private let toolbarView = NSView()
     private let modelButton = NSButton()
     private let settingsButton = NSButton()
+    private let pluginButton = NSButton()
 
     // 边栏
     private let conversationLabel = NSTextField()
@@ -258,6 +259,12 @@ class ChatViewController: NSViewController {
         settingsButton.action = #selector(showSettings); settingsButton.target = self
         toolbarView.addSubview(settingsButton)
 
+        pluginButton.translatesAutoresizingMaskIntoConstraints = false
+        pluginButton.title = "🧩"
+        pluginButton.bezelStyle = .rounded
+        pluginButton.action = #selector(showPluginMenu); pluginButton.target = self
+        toolbarView.addSubview(pluginButton)
+
         NSLayoutConstraint.activate([
             toolbarView.topAnchor.constraint(equalTo: chatContainer.topAnchor),
             toolbarView.leadingAnchor.constraint(equalTo: chatContainer.leadingAnchor),
@@ -266,6 +273,10 @@ class ChatViewController: NSViewController {
             modelButton.leadingAnchor.constraint(equalTo: toolbarView.leadingAnchor, constant: 12),
             modelButton.centerYAnchor.constraint(equalTo: toolbarView.centerYAnchor),
             modelButton.heightAnchor.constraint(equalToConstant: 26),
+            pluginButton.trailingAnchor.constraint(equalTo: settingsButton.leadingAnchor, constant: -8),
+            pluginButton.centerYAnchor.constraint(equalTo: toolbarView.centerYAnchor),
+            pluginButton.heightAnchor.constraint(equalToConstant: 26),
+            pluginButton.widthAnchor.constraint(equalToConstant: 36),
             settingsButton.trailingAnchor.constraint(equalTo: toolbarView.trailingAnchor, constant: -12),
             settingsButton.centerYAnchor.constraint(equalTo: toolbarView.centerYAnchor),
             settingsButton.heightAnchor.constraint(equalToConstant: 26),
@@ -949,6 +960,28 @@ AppLogger.shared.log("[loadConversations] 读取会话文件失败: \(error)")
         alert.alertStyle = .informational
         alert.addButton(withTitle: "确定")
         alert.runModal()
+    }
+
+    @objc func showPluginMenu() {
+        let menu = NSMenu()
+        for name in PluginManager.shared.pluginNames {
+            let item = NSMenuItem(title: name, action: #selector(openPlugin(_:)), keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        }
+        if menu.items.isEmpty {
+            let item = NSMenuItem(title: "暂无 Plugin", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        }
+        // 在按钮下方弹出
+        let buttonRect = pluginButton.convert(pluginButton.bounds, to: nil)
+        let windowRect = view.window!.convertToScreen(buttonRect)
+        menu.popUp(positioning: nil, at: NSPoint(x: windowRect.midX, y: windowRect.minY), in: nil)
+    }
+
+    @objc func openPlugin(_ sender: NSMenuItem) {
+        PluginManager.shared.openPlugin(sender.title)
     }
 
     // MARK: - Chat HTML
