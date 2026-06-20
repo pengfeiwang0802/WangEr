@@ -113,7 +113,7 @@ class ChatViewController: NSViewController {
     private var isStepIndicatorVisible = false
 
     // 文件缓存清理:最大 100MB,最多 100 个文件
-    private var currentModel = "DeepSeek V4 Flash"
+    private var currentModel = UserDefaults.standard.string(forKey: "selectedModel") ?? "DeepSeek V4 Flash"
     private var dsBalance: String = "--"
     private var moonshotBalance: String = "--"
     var currentAgentId = "main"
@@ -780,7 +780,7 @@ AppLogger.shared.log("[loadAvailableModels] 解析 openclaw.json 结构失败")
                 guard let modelList = config["models"] as? [[String: Any]] else { continue }
                 for model in modelList {
                     guard let modelId = model["id"] as? String else { continue }
-                    let displayName = model["name"] as? String ?? modelId
+                    let displayName = model["displayName"] as? String ?? model["name"] as? String ?? modelId
                     result.append(Models.ModelOption(displayName: displayName, apiModelId: "\(providerName)/\(modelId)"))
                 }
             }
@@ -819,6 +819,7 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
     @objc func selectModel(_ sender: NSMenuItem) {
         modelMenu.items.forEach { $0.state = .off }; sender.state = .on
         currentModel = sender.title; modelButton.title = "🧠 \(currentModel) ▾"; modelLabel.stringValue = "🤖 \(currentModel)"
+        UserDefaults.standard.set(currentModel, forKey: "selectedModel")
     }
     // MARK: - 文件拖拽
     private func setupFileDragDrop() {
