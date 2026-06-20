@@ -11,7 +11,10 @@ let package = Package(
         .executableTarget(
             name: "WangErChat",
             dependencies: [],
-            path: "Sources/WangErChat"
+            path: "Sources/WangErChat",
+            resources: [
+                .copy("live2d")
+            ]
         )
     ]
 )

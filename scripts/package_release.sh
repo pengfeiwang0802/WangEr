@@ -26,20 +26,30 @@ cp "$BUILD_DIR/WangErChat" "$APP_BUNDLE/Contents/MacOS/"
 # 4. 复制 Info.plist
 cp "$PROJECT_DIR/Sources/WangErChat/Info.plist" "$APP_BUNDLE/Contents/"
 
-# 5. 复制外部资源文件（表情 JSON 等）
+# 5. 复制 SPM resource bundle（含 live2d 模型资源）
+BUNDLE_PATH="$BUILD_DIR/WangErChat_WangErChat.bundle"
+if [ -d "$BUNDLE_PATH" ]; then
+  rm -rf "$APP_BUNDLE/Contents/Resources/WangErChat_WangErChat.bundle"
+  cp -R "$BUNDLE_PATH" "$APP_BUNDLE/Contents/Resources/"
+  echo "   ✅ Copied WangErChat_WangErChat.bundle ($(du -sh "$BUNDLE_PATH" | cut -f1))"
+else
+  echo "   ⚠️  Resource bundle not found: $BUNDLE_PATH"
+fi
+
+# 6. 复制外部资源文件（表情 JSON 等）
 if [ -f "$PROJECT_DIR/Sources/WangErChat/avatar_expression.json" ]; then
   cp "$PROJECT_DIR/Sources/WangErChat/avatar_expression.json" "$APP_BUNDLE/Contents/Resources/"
   echo "   ✅ Copied avatar_expression.json to Resources"
 fi
 
-# 6. 设置版本号
+# 7. 设置版本号
 if [ -n "$1" ]; then
   VERSION="$1"
   plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP_BUNDLE/Contents/Info.plist"
   echo "   ✅ Version set to $VERSION"
 fi
 
-# 7. 设置权限
+# 8. 设置权限
 chmod +x "$APP_BUNDLE/Contents/MacOS/WangErChat"
 
 echo "✅ Release bundle created at $APP_BUNDLE"

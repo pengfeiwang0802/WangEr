@@ -1,0 +1,873 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live2D Avatar</title>
+<style>
+html,body{margin:0;padding:0;overflow:hidden;width:100%;height:100%;background:transparent}
+body{display:flex;justify-content:center;align-items:center}
+canvas{display:block;width:100%;height:100%}
+#status-text{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);font-size:12px;color:rgba(255,255,255,0.6);font-family:-apple-system,sans-serif;text-align:center;pointer-events:none;text-shadow:0 1px 2px rgba(0,0,0,0.5);white-space:nowrap;opacity:0;transition:opacity 0.3s ease}
+#status-text.visible{opacity:1}
+#diag{position:absolute;top:4px;left:4px;right:4px;max-height:90%;overflow-y:auto;font-size:10px;font-family:monospace;color:#0f0;background:rgba(0,0,0,0.85);padding:6px;border-radius:4px;display:none;z-index:100;white-space:pre-wrap;word-break:break-all}
+#diag.show{display:block}
+</style>
+</head>
+<body>
+<canvas id="live2d-canvas"></canvas>
+<div id="status-text"></div>
+<div id="diag"></div>
+
+<script>
+// ============================================================
+// 🔧 诊断工具
+// ============================================================
+const diag=document.getElementById('diag'),diagLines=[];
+function diagLog(tag,msg){const line=`[${tag}] ${msg}`;diagLines.push(line);if(diagLines.length>50)diagLines.shift();diag.textContent=diagLines.join('\n');_diagLogSw(tag,msg)}
+function _diagLogSw(tag,msg){if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.log){try{window.webkit.messageHandlers.log.postMessage({tag:'DIAG',msg:'['+tag+'] '+msg})}catch(e){}}}
+diagLog('INIT','页面已加载');
+window.addEventListener('error',function(e){diagLog('ERROR',e.message)});
+window.addEventListener('unhandledrejection',function(e){diagLog('PROMISE',e.reason?.message||e.reason||'unknown')});
+
+// 🔗 console.log → Swift 日志桥接
+(function(){
+  var wkh=window.webkit&&window.webkit.messageHandlers;
+  function send(tag,args){
+    diagLog(tag,Array.prototype.slice.call(args).join(' '));
+    if(wkh&&wkh.log){
+      try{wkh.log.postMessage({tag:tag,msg:Array.prototype.slice.call(args).map(function(a){return typeof a==='object'?JSON.stringify(a):String(a)}).join(' ')})}catch(e){}
+    }
+  }
+  var _log=console.log,_warn=console.warn,_error=console.error;
+  console.log=function(){send('LOG',arguments);_log.apply(console,arguments)};
+  console.warn=function(){send('WARN',arguments);_warn.apply(console,arguments)};
+  console.error=function(){send('ERROR',arguments);_error.apply(console,arguments)};
+})();
+</script>
+
+<!-- Core -->
+<script src="core/live2dcubismcore.min.js"></script>
+<script>diagLog('CORE','Live2DCubismCore type: '+(typeof Live2DCubismCore))</script>
+
+<!-- Framework -->
+<script src="framework/framework.bundle.js"></script>
+<script>diagLog('L2D','L2D type: '+(typeof L2D))</script>
+
+<!-- 🔧 Shader 注入: Cubism 5 R5 用 fetch() 加载 .vert/.frag，WKWebView 不支持 -->
+<script>
+(function(){
+// 所有 13 个 shader 源文件 (内联，绕过 WKWebView file:// fetch 限制)
+const SHADERS={
+'vertshadersrc.vert':
+'attribute vec4 a_position;\n'+
+'attribute vec2 a_texCoord;\n'+
+'varying vec2 v_texCoord;\n'+
+'uniform mat4 u_matrix;\n'+
+'void main(){\n'+
+'gl_Position=u_matrix*a_position;\n'+
+'v_texCoord=a_texCoord;\n'+
+'}\n',
+
+'vertshadersrcmasked.vert':
+'attribute vec4 a_position;\n'+
+'attribute vec2 a_texCoord;\n'+
+'varying vec2 v_texCoord;\n'+
+'varying vec4 v_clipPos;\n'+
+'uniform mat4 u_matrix;\n'+
+'uniform mat4 u_clipMatrix;\n'+
+'void main(){\n'+
+'gl_Position=u_matrix*a_position;\n'+
+'v_clipPos=u_clipMatrix*a_position;\n'+
+'v_texCoord=a_texCoord;\n'+
+'}\n',
+
+'vertshadersrcsetupmask.vert':
+'attribute vec4 a_position;\n'+
+'attribute vec2 a_texCoord;\n'+
+'varying vec2 v_texCoord;\n'+
+'varying vec4 v_position;\n'+
+'void main(){\n'+
+'gl_Position=a_position;\n'+
+'v_texCoord=a_texCoord;\n'+
+'v_position=a_position;\n'+
+'}\n',
+
+'fragshadersrcsetupmask.frag':
+'precision mediump float;\n'+
+'varying vec2 v_texCoord;\n'+
+'varying vec4 v_position;\n'+
+'uniform sampler2D s_texture0;\n'+
+'uniform vec4 u_channelFlag;\n'+
+'uniform vec4 u_baseColor;\n'+
+'void main(){\n'+
+'float isInside=step(0.0,v_position.x)*step(0.0,v_position.y)*step(v_position.x,1.0)*step(v_position.y,1.0);\n'+
+'vec4 texColor=texture2D(s_texture0,v_texCoord);\n'+
+'texColor.rgb=texColor.rgb*u_baseColor.a;\n'+
+'texColor=texColor*u_baseColor;\n'+
+'float alpha=texColor.a*u_channelFlag.a;\n'+
+'gl_FragColor=vec4(u_channelFlag.rgb,alpha)*isInside;\n'+
+'}\n',
+
+'fragshadersrcpremultipliedalpha.frag':
+'precision mediump float;\n'+
+'varying vec2 v_texCoord;\n'+
+'uniform sampler2D s_texture0;\n'+
+'uniform vec4 u_baseColor;\n'+
+'uniform vec4 u_multiplyColor;\n'+
+'uniform vec4 u_screenColor;\n'+
+'void main(){\n'+
+'vec4 texColor=texture2D(s_texture0,v_texCoord);\n'+
+'texColor.rgb=texColor.rgb*u_baseColor.a;\n'+
+'// BYPASS multiply/screen\n'+
+'texColor=texColor*u_baseColor;\n'+
+'gl_FragColor=vec4(texColor.rgb*texColor.a,texColor.a);\n'+
+'}\n',
+
+'fragshadersrcmaskpremultipliedalpha.frag':
+'precision mediump float;\n'+
+'varying vec2 v_texCoord;\n'+
+'varying vec4 v_clipPos;\n'+
+'uniform sampler2D s_texture0;\n'+
+'uniform sampler2D s_texture1;\n'+
+'uniform vec4 u_channelFlag;\n'+
+'uniform vec4 u_baseColor;\n'+
+'uniform vec4 u_multiplyColor;\n'+
+'uniform vec4 u_screenColor;\n'+
+'void main(){\n'+
+'vec4 texColor=texture2D(s_texture0,v_texCoord);\n'+
+'texColor.rgb=texColor.rgb*u_baseColor.a;\n'+
+'vec4 clipMask=texture2DProj(s_texture1,v_clipPos);\n'+
+'float maskVal=0.0;\n'+
+'maskVal+=clipMask.r*u_channelFlag.r;\n'+
+'maskVal+=clipMask.g*u_channelFlag.g;\n'+
+'maskVal+=clipMask.b*u_channelFlag.b;\n'+
+'maskVal+=clipMask.a*u_channelFlag.a;\n'+
+'texColor=texColor*maskVal;\n'+
+'// BYPASS multiply/screen\n'+
+'texColor=texColor*u_baseColor;\n'+
+'gl_FragColor=vec4(texColor.rgb*texColor.a,texColor.a);\n'+
+'}\n',
+
+'fragshadersrcmaskinvertedpremultipliedalpha.frag':
+'precision mediump float;\n'+
+'varying vec2 v_texCoord;\n'+
+'varying vec4 v_clipPos;\n'+
+'uniform sampler2D s_texture0;\n'+
+'uniform sampler2D s_texture1;\n'+
+'uniform vec4 u_channelFlag;\n'+
+'uniform vec4 u_baseColor;\n'+
+'uniform vec4 u_multiplyColor;\n'+
+'uniform vec4 u_screenColor;\n'+
+'void main(){\n'+
+'vec4 texColor=texture2D(s_texture0,v_texCoord);\n'+
+'texColor.rgb=texColor.rgb*u_baseColor.a;\n'+
+'vec4 clipMask=texture2DProj(s_texture1,v_clipPos);\n'+
+'float maskVal=0.0;\n'+
+'maskVal+=clipMask.r*u_channelFlag.r;\n'+
+'maskVal+=clipMask.g*u_channelFlag.g;\n'+
+'maskVal+=clipMask.b*u_channelFlag.b;\n'+
+'maskVal+=clipMask.a*u_channelFlag.a;\n'+
+'maskVal=1.0-maskVal;\n'+
+'texColor=texColor*maskVal;\n'+
+'// BYPASS multiply/screen\n'+
+'texColor=texColor*u_baseColor;\n'+
+'gl_FragColor=vec4(texColor.rgb*texColor.a,texColor.a);\n'+
+'}\n',
+
+'vertshadersrccopy.vert':
+'attribute vec4 a_position;\n'+
+'attribute vec2 a_texCoord;\n'+
+'varying vec2 v_texCoord;\n'+
+'void main(){\n'+
+'gl_Position=a_position;\n'+
+'v_texCoord=a_texCoord;\n'+
+'}\n',
+
+'fragshadersrccopy.frag':
+'precision mediump float;\n'+
+'varying vec2 v_texCoord;\n'+
+'uniform sampler2D s_texture0;\n'+
+'uniform vec4 u_baseColor;\n'+
+'void main(){\n'+
+'vec4 texColor=texture2D(s_texture0,v_texCoord);\n'+
+'texColor=texColor*u_baseColor;\n'+
+'gl_FragColor=texColor;\n'+
+'}\n',
+
+'fragshadersrccolorblend.frag':
+'vec4 ApplyColorBlend(vec4 src,vec4 dst){\n'+
+'#ifdef COLOR_BLEND_MULTIPLY\n'+
+'return vec4(src.rgb*dst.rgb,src.a*dst.a);\n'+
+'#elif defined(COLOR_BLEND_SCREEN)\n'+
+'return vec4(1.0-(1.0-src.rgb)*(1.0-dst.rgb),src.a*dst.a);\n'+
+'#elif defined(COLOR_BLEND_OVERLAY)\n'+
+'vec3 low=2.0*src.rgb*dst.rgb;\n'+
+'vec3 high=1.0-2.0*(1.0-src.rgb)*(1.0-dst.rgb);\n'+
+'vec3 cond=step(0.5,dst.rgb);\n'+
+'return vec4(mix(low,high,cond),src.a*dst.a);\n'+
+'#elif defined(COLOR_BLEND_DODGE)\n'+
+'return vec4(dst.rgb/(1.0-src.rgb),src.a*dst.a);\n'+
+'#elif defined(COLOR_BLEND_BURN)\n'+
+'return vec4(1.0-(1.0-dst.rgb)/src.rgb,src.a*dst.a);\n'+
+'#elif defined(COLOR_BLEND_DARKEN)\n'+
+'return vec4(min(src.rgb,dst.rgb),src.a*dst.a);\n'+
+'#elif defined(COLOR_BLEND_LIGHTEN)\n'+
+'return vec4(max(src.rgb,dst.rgb),src.a*dst.a);\n'+
+'#elif defined(COLOR_BLEND_DIFFERENCE)\n'+
+'return vec4(abs(dst.rgb-src.rgb),src.a*dst.a);\n'+
+'#elif defined(COLOR_BLEND_EXCLUSION)\n'+
+'return vec4(dst.rgb+src.rgb-2.0*dst.rgb*src.rgb,src.a*dst.a);\n'+
+'#elif defined(COLOR_BLEND_HSL_HUE)\n'+
+'return vec4(HslBlendHue(src,dst),src.a*dst.a);\n'+
+'#elif defined(COLOR_BLEND_HSL_SATURATION)\n'+
+'return vec4(HslBlendSaturation(src,dst),src.a*dst.a);\n'+
+'#elif defined(COLOR_BLEND_HSL_COLOR)\n'+
+'return vec4(HslBlendColor(src,dst),src.a*dst.a);\n'+
+'#elif defined(COLOR_BLEND_HSL_LUMINOSITY)\n'+
+'return vec4(HslBlendLuminosity(src,dst),src.a*dst.a);\n'+
+'#else\n'+
+'return src;\n'+
+'#endif\n'+
+'}\n'+
+'vec3 RgbToHsl(vec3 c){\n'+
+'float maxC=max(c.r,max(c.g,c.b));\n'+
+'float minC=min(c.r,min(c.g,c.b));\n'+
+'float l=(maxC+minC)*0.5;\n'+
+'if(maxC==minC)return vec3(0.0,0.0,l);\n'+
+'float d=maxC-minC;\n'+
+'float s=d/(1.0-abs(2.0*l-1.0));\n'+
+'float h=0.0;\n'+
+'if(maxC==c.r)h=(c.g-c.b)/d+(c.g<c.b?6.0:0.0);\n'+
+'else if(maxC==c.g)h=(c.b-c.r)/d+2.0;\n'+
+'else h=(c.r-c.g)/d+4.0;\n'+
+'h/=6.0;\n'+
+'return vec3(h,s,l);\n'+
+'}\n'+
+'float HueToRgb(float p,float q,float t){\n'+
+'if(t<0.0)t+=1.0;\n'+
+'if(t>1.0)t-=1.0;\n'+
+'if(t<1.0/6.0)return p+(q-p)*6.0*t;\n'+
+'if(t<1.0/2.0)return q;\n'+
+'if(t<2.0/3.0)return p+(q-p)*(2.0/3.0-t)*6.0;\n'+
+'return p;\n'+
+'}\n'+
+'vec3 HslToRgb(vec3 hsl){\n'+
+'float h=hsl.x,s=hsl.y,l=hsl.z;\n'+
+'if(s==0.0)return vec3(l,l,l);\n'+
+'float q=l<0.5?l*(1.0+s):l+s-l*s;\n'+
+'float p=2.0*l-q;\n'+
+'return vec3(HueToRgb(p,q,h+1.0/3.0),HueToRgb(p,q,h),HueToRgb(p,q,h-1.0/3.0));\n'+
+'}\n'+
+'vec3 HslBlendHue(vec4 src,vec4 dst){\n'+
+'vec3 srcHsl=RgbToHsl(src.rgb);\n'+
+'vec3 dstHsl=RgbToHsl(dst.rgb);\n'+
+'return HslToRgb(vec3(srcHsl.x,dstHsl.y,dstHsl.z));\n'+
+'}\n'+
+'vec3 HslBlendSaturation(vec4 src,vec4 dst){\n'+
+'vec3 srcHsl=RgbToHsl(src.rgb);\n'+
+'vec3 dstHsl=RgbToHsl(dst.rgb);\n'+
+'return HslToRgb(vec3(dstHsl.x,srcHsl.y,dstHsl.z));\n'+
+'}\n'+
+'vec3 HslBlendColor(vec4 src,vec4 dst){\n'+
+'vec3 srcHsl=RgbToHsl(src.rgb);\n'+
+'return HslToRgb(vec3(srcHsl.xy,RgbToHsl(dst.rgb).z));\n'+
+'}\n'+
+'vec3 HslBlendLuminosity(vec4 src,vec4 dst){\n'+
+'vec3 srcHsl=RgbToHsl(src.rgb);\n'+
+'return HslToRgb(vec3(RgbToHsl(dst.rgb).x,RgbToHsl(dst.rgb).y,srcHsl.z));\n'+
+'}\n',
+
+'fragshadersrcalphablend.frag':
+'vec4 ApplyAlphaBlend(vec4 src,vec4 dst){\n'+
+'#ifdef ALPHA_BLEND_REGULAR\n'+
+'return vec4(src.rgb*src.a+dst.rgb*dst.a*(1.0-src.a),src.a+dst.a*(1.0-src.a));\n'+
+'#elif defined(ALPHA_BLEND_OVER)\n'+
+'return vec4(src.rgb+dst.rgb*(1.0-src.a),src.a+dst.a*(1.0-src.a));\n'+
+'#else\n'+
+'return src;\n'+
+'#endif\n'+
+'}\n',
+
+'vertshadersrcblend.vert':
+'attribute vec4 a_position;\n'+
+'attribute vec2 a_texCoord;\n'+
+'varying vec2 v_texCoord;\n'+
+'uniform mat4 u_matrix;\n'+
+'#ifdef CLIPPING_MASK\n'+
+'varying vec4 v_clipPos;\n'+
+'uniform mat4 u_clipMatrix;\n'+
+'#endif\n'+
+'void main(){\n'+
+'gl_Position=u_matrix*a_position;\n'+
+'v_texCoord=a_texCoord;\n'+
+'#ifdef CLIPPING_MASK\n'+
+'v_clipPos=u_clipMatrix*a_position;\n'+
+'#endif\n'+
+'}\n',
+
+'fragshadersrcpremultipliedalphablend.frag':
+'uniform sampler2D s_texture0;\n'+
+'uniform sampler2D s_blendTexture;\n'+
+'uniform vec4 u_baseColor;\n'+
+'#ifdef CLIPPING_MASK\n'+
+'uniform sampler2D s_texture1;\n'+
+'uniform vec4 u_channelFlag;\n'+
+'uniform float u_invertClippingMask;\n'+
+'#endif\n'+
+'uniform vec4 u_multiplyColor;\n'+
+'uniform vec4 u_screenColor;\n'+
+'varying vec2 v_texCoord;\n'+
+'#ifdef CLIPPING_MASK\n'+
+'varying vec4 v_clipPos;\n'+
+'#endif\n'+
+'void main(){\n'+
+'vec4 texColor=texture2D(s_texture0,v_texCoord);\n'+
+'texColor.rgb=texColor.rgb*u_baseColor.a;\n'+
+'#ifdef CLIPPING_MASK\n'+
+'vec4 clipMask=texture2DProj(s_texture1,v_clipPos);\n'+
+'float maskVal=0.0;\n'+
+'maskVal+=clipMask.r*u_channelFlag.r;\n'+
+'maskVal+=clipMask.g*u_channelFlag.g;\n'+
+'maskVal+=clipMask.b*u_channelFlag.b;\n'+
+'maskVal+=clipMask.a*u_channelFlag.a;\n'+
+'if(u_invertClippingMask>0.5)maskVal=1.0-maskVal;\n'+
+'texColor=texColor*maskVal;\n'+
+'#endif\n'+
+'// BYPASS multiply/screen\n'+
+'texColor=texColor*u_baseColor;\n'+
+'vec4 blendColor=texture2D(s_blendTexture,v_texCoord);\n'+
+'vec4 colorBlend=ApplyColorBlend(texColor,blendColor);\n'+
+'vec4 alphaBlend=ApplyAlphaBlend(colorBlend,blendColor);\n'+
+'gl_FragColor=vec4(alphaBlend.rgb*alphaBlend.a,alphaBlend.a);\n'+
+'}\n',
+};// end SHADERS
+
+// Intercept fetch() for shader file URLs (CubismShader_WebGL is internal, not in L2D exports)
+const _origFetch=window.fetch;
+let _shaderHits=0,_shaderMisses=[],_fetchCallCount=0;
+window.fetch=function(url,opts){
+  _fetchCallCount++;
+  // 前 30 次 fetch 调用都打 log 到 console（WKWebView 可捕获）
+  if(_fetchCallCount<=30)console.log('[FETCH #'+_fetchCallCount+'] '+String(url).substring(0,120));
+  if(typeof url==='string'){
+    const fn=url.split('/').pop();
+    const src=SHADERS[fn];
+    if(src){
+      _shaderHits++;
+      diagLog('SHADER','✅ #'+_shaderHits+' hit: '+fn+' ('+src.length+'B)');
+      if(_shaderHits<=13)console.log('[SHADER HIT] '+fn);
+      return Promise.resolve({ok:true,status:200,text:()=>Promise.resolve(src)});
+    }
+    // 漏网之鱼：framework 请求了不在 SHADERS map 里的文件
+    if(_shaderMisses.indexOf(fn)===-1){_shaderMisses.push(fn);diagLog('SHADER','❌ miss: '+fn+' (url='+url+')');console.log('[SHADER MISS] '+fn+' url='+url)}
+  }
+  if(_fetchCallCount<=30)console.log('[FETCH PASSTHROUGH]');
+  return _origFetch.apply(this,arguments);
+};
+diagLog('SHADER','✅ fetch 拦截器就绪, keys='+Object.keys(SHADERS).length);
+console.log('[FETCH INTERCEPT] 拦截器就绪, shader keys='+Object.keys(SHADERS).length);
+
+// 同时 hook console.error 抓异步错误
+const _origError=console.error.bind(console);
+console.error=function(...args){diagLog('ERROR',args.join(' '));_origError(...args)};
+})();
+</script>
+
+<script>
+// ============================================================
+// 文件加载（Swift 注入 + XHR fallback）
+// ============================================================
+window.__fileData = {};
+window.__loadFile = async function(path) {
+  const key = path.replace(/^\.\//, '');
+  const b64 = window.__fileData[key];
+  if (b64 === undefined) {
+    diagLog('LOAD','❌ 未找到文件: '+key);
+    throw new Error('File not found: '+key);
+  }
+
+  const useNative = typeof Uint8Array.fromBase64 === 'function';
+  const bytes = useNative
+    ? Uint8Array.fromBase64(b64)
+    : (() => {
+        const bin = atob(b64);
+        const arr = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        return arr;
+      })();
+
+  // 手工拷贝到独立 ArrayBuffer（不经过 Blob/Response，WASM 最友好）
+  const ab = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(ab).set(bytes);
+
+  const hdr = Array.from(new Uint8Array(ab).slice(0, 4)).map(b => '0x'+b.toString(16).padStart(2,'0')).join(' ');
+  const ext = key.split('.').pop().toLowerCase();
+  diagLog('LOAD', `↳ ${ext==='moc3'?'MOC':'JSON'} ${key}: src=${bytes.byteLength}B ab=${ab.byteLength}B useNative=${useNative} hdr=${hdr}`);
+
+  return {
+    ok: true, status: 200,
+    json: async () => JSON.parse(new TextDecoder().decode(new Uint8Array(ab))),
+    arrayBuffer: async () => ab,
+  };
+};
+</script>
+
+<script>
+// ============================================================
+// 检查
+// ============================================================
+if(typeof Live2DCubismCore==='undefined')diagLog('FATAL','Core 未加载');
+if(typeof L2D==='undefined')diagLog('FATAL','Framework 未加载');
+
+const{CubismFramework,Option,CubismModelSettingJson,CubismUserModel,CubismMoc,CubismMatrix44,CubismModelMatrix,CubismRenderer_WebGL,CubismMotionManager,CubismMotion,CubismEyeBlink,CubismBreath,CubismPose,CubismPhysics}=L2D||{};
+// 注意: CubismWebGLOffscreenManager 是 SDK 内部类，不应外部调用；doDrawModel() 内部已处理全部 Clipping Mask 管线
+diagLog('ALIAS','CubismFramework='+(typeof CubismFramework));
+
+// ============================================================
+// 表情参数映射
+// ============================================================
+const EXPRESSION_PARAMS={
+  neutral:{ParamMouthForm:0,ParamMouthOpenY:0,ParamEyeLOpen:1,ParamEyeROpen:1,ParamBrowLY:0,ParamBrowRY:0,ParamBrowLAngle:0,ParamBrowRAngle:0,ParamEyeLSmile:0,ParamEyeRSmile:0,ParamCheek:0},
+  happy:{ParamMouthForm:0.7,ParamMouthOpenY:0.3,ParamEyeLOpen:0.8,ParamEyeROpen:0.8,ParamBrowLY:0.3,ParamBrowRY:0.3,ParamBrowLAngle:0.2,ParamBrowRAngle:0.2,ParamEyeLSmile:0.8,ParamEyeRSmile:0.8,ParamCheek:0.3},
+  sad:{ParamMouthForm:-0.3,ParamMouthOpenY:0.1,ParamEyeLOpen:0.6,ParamEyeROpen:0.6,ParamBrowLY:-0.3,ParamBrowRY:-0.3,ParamBrowLAngle:-0.3,ParamBrowRAngle:-0.3,ParamEyeLSmile:-0.2,ParamEyeRSmile:-0.2},
+  angry:{ParamMouthForm:-0.5,ParamMouthOpenY:0.2,ParamEyeLOpen:0.9,ParamEyeROpen:0.9,ParamBrowLY:-0.5,ParamBrowRY:-0.5,ParamBrowLAngle:-0.6,ParamBrowRAngle:-0.6,ParamEyeLSmile:-0.3,ParamEyeRSmile:-0.3},
+  surprise:{ParamMouthForm:0.5,ParamMouthOpenY:0.8,ParamEyeLOpen:1,ParamEyeROpen:1,ParamBrowLY:0.6,ParamBrowRY:0.6,ParamBrowLAngle:0.4,ParamBrowRAngle:0.4,ParamEyeLSmile:0,ParamEyeRSmile:0},
+  thinking:{ParamMouthForm:-0.1,ParamMouthOpenY:0,ParamEyeLOpen:0.5,ParamEyeROpen:0.5,ParamBrowLY:0.1,ParamBrowRY:0.1,ParamBrowLAngle:-0.1,ParamBrowRAngle:-0.1,ParamEyeBallX:-0.3,ParamEyeBallY:0.2},
+  sleepy:{ParamMouthForm:0,ParamMouthOpenY:0.1,ParamEyeLOpen:0.3,ParamEyeROpen:0.3,ParamBrowLY:-0.1,ParamBrowRY:-0.1},
+};
+function lerp(a,b,t){return a+(b-a)*t}
+
+// ============================================================
+// WebGL
+// ============================================================
+const canvas=document.getElementById('live2d-canvas');
+const statusEl=document.getElementById('status-text');
+let gl=null,model=null,renderer=null,modelMatrix=null,projectionMatrix=null;
+let modelSetting=null,motionMgr=null,eyeBlink=null,breath=null,pose=null,physics=null;
+let isReady=false,animFrameId=null,statusTimeout=null;
+
+function initWebGL(){
+  diagLog('GL','初始化 WebGL...');
+  gl=canvas.getContext('webgl2',{alpha:true,premultipliedAlpha:true,antialias:true})
+    ||canvas.getContext('webgl',{alpha:true,premultipliedAlpha:true,antialias:true});
+  if(!gl){diagLog('GL','❌ 失败');return false}
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE,gl.ONE_MINUS_SRC_ALPHA);
+  // 🔑 深度测试：Clipping Mask 渲染必需
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthFunc(gl.LEQUAL);
+  gl.clearDepth(1.0);
+  gl.clearColor(0,0,0,0);
+  diagLog('GL','✅ '+gl.getParameter(gl.VERSION));
+
+  // 🔧 Hook compileShader + linkProgram 抓编译/链接失败
+  const _origCompile=gl.compileShader.bind(gl);
+  const _origLink=gl.linkProgram.bind(gl);
+  const _origCreateProgram=gl.createProgram.bind(gl);
+  let _programCount=0;
+  gl.compileShader=function(shader){
+    _origCompile(shader);
+    if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)){
+      const log=gl.getShaderInfoLog(shader)||'';
+      diagLog('GLSL','❌ COMPILE FAIL: '+log.substring(0,200));
+      console.error('[GLSL COMPILE FAIL] '+log);
+    }
+  };
+  gl.linkProgram=function(program){
+    _origLink(program);
+    if(!gl.getProgramParameter(program,gl.LINK_STATUS)){
+      const log=gl.getProgramInfoLog(program)||'';
+      diagLog('GLSL','❌ LINK FAIL: '+log.substring(0,200));
+      console.error('[GLSL LINK FAIL] '+log);
+    } else {
+      _programCount++;
+      const count=gl.getProgramParameter(program,gl.ACTIVE_UNIFORMS);
+      if(_programCount<=15)diagLog('GLSL','✅ program #'+_programCount+' linked, '+count+' uniforms');
+    }
+  };
+  gl._programCount=()=>_programCount;
+
+  // Hook drawElements 统计每帧 draw call
+  const _origDrawElements=gl.drawElements.bind(gl);
+  let _drawCallCount=0,_renderPassCount=0;
+  gl.drawElements=function(...args){_drawCallCount++;_origDrawElements(...args)};
+  gl._drawCallCount=()=>_drawCallCount;
+  gl._resetDrawCallCount=()=>{const c=_drawCallCount;_drawCallCount=0;return c};
+  diagLog('GLSL','✅ compile/link 诊断钩子就绪');
+  return true;
+}
+
+function initCubism(){
+  diagLog('CUB','初始化 Cubism Framework...');
+  const opt=new Option();
+  opt.logFunction=msg=>diagLog('CUB',msg);
+  opt.loggingLevel=2;
+  CubismFramework.startUp(opt);
+  CubismFramework.initialize();
+  diagLog('CUB','✅');
+  return true;
+}
+
+// ============================================================
+// 模型加载（使用相对路径，与 index.html 同目录）
+// ============================================================
+const MODEL_BASE='./model/Hiyori/';
+
+async function loadModel(){
+  const BASE=MODEL_BASE;
+
+  diagLog('LOAD','请求 model3.json...');
+  let resp=await window.__loadFile(BASE+'Hiyori.model3.json');
+  diagLog('LOAD','status='+resp.status);
+  const model3Buf=await resp.arrayBuffer();
+  const jsonData=await resp.json();
+  modelSetting=new CubismModelSettingJson(new Uint8Array(model3Buf),model3Buf.byteLength);
+  diagLog('LOAD','✅ model3.json 解析成功, size='+model3Buf.byteLength);
+
+  diagLog('LOAD','请求 MOC...');
+  resp=await window.__loadFile(BASE+'Hiyori.moc3');
+  const mocBuf=await resp.arrayBuffer();
+  diagLog('LOAD','MOC size='+mocBuf.byteLength);
+  const mocConsistency = CubismMoc.hasMocConsistency(mocBuf);
+  diagLog('LOAD','hasMocConsistency='+mocConsistency);
+
+  model=new CubismUserModel();
+  // loadModel 的签名是 (buffer:ArrayBuffer, shouldCheckMocConsistency:bool)
+  // 它内部会调用 CubismMoc.create(buffer)，必须传原始字节！
+  model.loadModel(mocBuf, true);
+  model.createRenderer();
+  renderer=model.getRenderer();
+  renderer.startUp(gl);
+  diagLog('LOAD','✅ Renderer 启动');
+
+  const texCount=modelSetting.getTextureCount();
+  diagLog('LOAD','纹理数='+texCount);
+  for(let i=0;i<texCount;i++){
+    const texFile=modelSetting.getTextureFileName(i);
+    const texKey=BASE.replace(/^\.\//,'')+texFile.replace(/^\.\//,'');
+    diagLog('TEX',`[${i}] 加载: ${texFile} (key=${texKey})`);
+    // 打印 __fileData 中所有含 "png" 的 key 用于诊断
+    if(i===0){const pngKeys=Object.keys(window.__fileData).filter(k=>k.includes('png'));diagLog('TEX','__fileData PNG keys: '+JSON.stringify(pngKeys.slice(0,5)))};
+    const texResp=await window.__loadFile(BASE+texFile);
+    const texBuf=await texResp.arrayBuffer();
+    const blob=new Blob([texBuf],{type:'image/png'});
+    const img=new Image();
+    img.src=URL.createObjectURL(blob);
+    await new Promise((resolve,reject)=>{
+      img.onload=()=>{
+        diagLog('TEX',`[${i}] ✅ ${img.width}x${img.height}`);
+        try{
+          // Canvas 中转：绕过 WKWebView file:// 的 WebGL CORS 检查
+          const c=document.createElement('canvas');
+          c.width=img.width;c.height=img.height;
+          const ctx=c.getContext('2d');
+          ctx.drawImage(img,0,0);
+          diagLog('TEX',`[${i}] canvas draw OK`);
+          const tex=gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D,tex);
+          gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,c);
+          diagLog('TEX',`[${i}] texImage2D OK`);
+          gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+          gl.generateMipmap(gl.TEXTURE_2D);
+          renderer.bindTexture(i,tex);
+          diagLog('TEX',`[${i}] bindTexture OK`);
+          resolve();
+        }catch(err){
+          diagLog('TEX',`[${i}] 💥 ${err.message || err}`);
+          resolve();
+        }
+      };
+      img.onerror=()=>{diagLog('TEX',`[${i}] ❌ 加载失败`);resolve()};
+    });
+  }
+  diagLog('LOAD','✅ 纹理全部完成');
+
+  diagLog('LOAD','设置投影矩阵...');
+  // getCanvasWidth/getCanvasHeight 在 CubismModel（Core wrapper）上，不在 modelSetting 上！
+  const coreModel=model.getModel();
+  const mw=coreModel.getCanvasWidth(),mh=coreModel.getCanvasHeight();
+  diagLog('LOAD',`Canvas: ${mw}x${mh}, view: ${canvas.clientWidth}x${canvas.clientHeight}`);
+  projectionMatrix=new CubismMatrix44();
+  const w=canvas.clientWidth,h=canvas.clientHeight;
+  const aspect=(w/h)/(mw/mh);
+  if(aspect>1)projectionMatrix.scale(1,1/aspect);
+  else projectionMatrix.scale(aspect,1);
+  // getModelMatrix() 返回模型内部的 _modelMatrix 引用，直接改它即可
+  const modelMtx=model.getModelMatrix();
+  modelMtx.setWidth(2);
+  renderer.setMvpMatrix(projectionMatrix);
+  renderer.setIsPremultipliedAlpha(true);
+  diagLog('LOAD','✅ 投影矩阵 OK');
+
+  const physFile=modelSetting.getPhysicsFileName();
+  if(physFile){
+    diagLog('LOAD','物理: '+physFile);
+    const physResp=await window.__loadFile(BASE+physFile);
+    const physBuf=await physResp.arrayBuffer();
+    diagLog('LOAD','物理 buf='+physBuf.byteLength+'B');
+    physics=CubismPhysics.create(physBuf,physBuf.byteLength);
+    diagLog('LOAD','✅ CubismPhysics OK');
+  }
+  const poseFile=modelSetting.getPoseFileName();
+  if(poseFile){
+    diagLog('LOAD','姿势: '+poseFile);
+    const poseResp=await window.__loadFile(BASE+poseFile);
+    const poseBuf=await poseResp.arrayBuffer();
+    diagLog('LOAD','姿势 buf='+poseBuf.byteLength+'B');
+    pose=CubismPose.create(poseBuf,poseBuf.byteLength);
+    diagLog('LOAD','✅ CubismPose OK');
+  }
+
+  diagLog('LOAD','创建 EyeBlink...');
+  eyeBlink=CubismEyeBlink.create(modelSetting);
+  diagLog('LOAD','创建 Breath...');
+  breath=CubismBreath.create();
+  // CubismBreath.create() 只创建空实例，需要手动设置呼吸参数
+  setupBreathParameters(breath);
+  diagLog('LOAD','✅ Breath 参数已设置');
+  diagLog('LOAD','创建 MotionManager...');
+  motionMgr=new CubismMotionManager();
+  diagLog('LOAD','✅ 动画组件全部 OK');
+
+  isReady=true;
+  diagLog('READY','✅✅✅ 模型数据加载完成！');
+  // 立即启动渲染循环 — Cubism shader 是懒惰编译的，drawModel 触发
+  startLoop();
+  startIdleMotion();
+}
+
+function setupBreathParameters(breath){
+  const idMgr=CubismFramework.getIdManager();
+  // BreathParameterData is not exported in L2D public API;
+  // plain object with same shape works identically.
+  const params=[
+    {parameterId:idMgr.getId('ParamAngleX'),   offset:0, peak:10, cycle:6.5345, weight:0.3},
+    {parameterId:idMgr.getId('ParamAngleY'),   offset:0, peak:5,  cycle:3.5345, weight:0.3},
+    {parameterId:idMgr.getId('ParamAngleZ'),   offset:0, peak:5,  cycle:5.5345, weight:0.3},
+    {parameterId:idMgr.getId('ParamBodyAngleX'),offset:0, peak:3,  cycle:10.5345,weight:0.3},
+    {parameterId:idMgr.getId('ParamBreath'),   offset:0, peak:0.5,cycle:3.2345, weight:0.5},
+  ];
+  breath.setParameters(params);
+}
+
+function startIdleMotion(){startMotion('Idle')}
+function startMotion(group,no){
+  if(!modelSetting||!model)return;
+  const count=modelSetting.getMotionCount(group);
+  if(count===0)return;
+  const idx=(no>=0&&no<count)?no:Math.floor(Math.random()*count);
+  const file=modelSetting.getMotionFileName(group,idx);
+  window.__loadFile(MODEL_BASE+file)
+    .then(r=>r.arrayBuffer())
+    .then(buf=>{
+      try{
+        const motion=CubismMotion.create(buf,buf.byteLength,
+          function(){diagLog('MOT','动作结束 → 播放下一个');startIdleMotion()},
+          null,true);
+        diagLog('MOT','Motion create OK: '+buf.byteLength+'B');
+        // 🔧 API 层的 Bug: CubismMotion 内部 _eyeBlinkParameterIds 默认是 null，
+        // 但 updateParameters() 直接调用 this._eyeBlinkParameterIds.length，
+        // 必须显式 setEffectIds 初始化（否则 MotionManager 每帧崩溃）
+        motion.setEffectIds([], []);
+        const fi=modelSetting.getMotionFadeInTimeValue(group,idx);
+        const fo=modelSetting.getMotionFadeOutTimeValue(group,idx);
+        if(fi>=0)motion.setFadeInTime(fi);
+        if(fo>=0)motion.setFadeOutTime(fo);
+        diagLog('MOT','startMotionPriority...');
+        motionMgr.startMotionPriority(motion,true,3);
+        diagLog('MOT','✅ 动作播放中');
+      }catch(e){
+        diagLog('MOT','💥 '+e.message+'\n'+((e.stack||'').substring(0,200)));
+      }
+    })
+    .catch(err=>diagLog('MOT','❌ '+err));
+}
+
+// ============================================================
+// 渲染循环
+// ============================================================
+function waitForShaders(){
+  return new Promise(resolve=>{
+    let start=performance.now();
+    const check=()=>{
+      const pc=gl._programCount?gl._programCount():0;
+      if(pc>0){resolve(pc);return}
+      if(performance.now()-start>5000){diagLog('SHADER','⚠️ 超时: '+pc+' programs after 5s, 强制继续');resolve(0);return}
+      requestAnimationFrame(check);
+    };
+    requestAnimationFrame(check);
+  });
+}
+
+// 🧪 诊断：等 shader 编译完再启动裸渲染（无任何动画组件）
+function waitForDebugStart(){
+  const _check=()=>{
+    const pc=gl._programCount();
+    if(pc>=15){diagLog('DIAG','✅ 所有 '+pc+' 个 shader program 就绪，启动裸渲染');startDebugLoop();return}
+    if(pc>0)diagLog('DIAG','等待 shader... programs='+pc+'/15');
+    requestAnimationFrame(_check);
+  };
+  requestAnimationFrame(_check);
+}
+
+function startDebugLoop(){
+  if(animFrameId)return;
+  let frame=0;
+  gl._resetDrawCallCount();
+  const loop=()=>{
+    if(!isReady||!model||!gl){animFrameId=requestAnimationFrame(loop);return}
+    const m=model.getModel();
+    try{m.loadParameters()}catch(e){}
+    // 🧪 什么都不动，只用 MOC3 默认参数 — 期望看到标准 T-pose
+    try{m.saveParameters()}catch(e){}
+    try{m.update()}catch(e){}
+    try{gl.viewport(0,0,gl.canvas.width,gl.canvas.height)}catch(e){}
+    try{gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT)}catch(e){}
+    // ✅ SDK 内部 doDrawModel() 已处理全部 WebGL 状态，无需外部 setRenderState
+    try{renderer.drawModel()}catch(e){diagLog('DIAG','💥 bareDrawModel: '+(e.message||e))}
+    if(frame===0){
+      const dc=gl._drawCallCount?gl._drawCallCount():-1;
+      const drawableCount=m.getDrawableCount();
+      const pc=gl._programCount?gl._programCount():-1;
+      diagLog('DIAG',`🧪 裸渲染首帧: programs=${pc} drawCalls=${dc} drawables=${drawableCount}`);
+      // 打印每个 drawable 的纹理和可见性
+      for(let i=0;i<Math.min(drawableCount,10);i++){
+        const vis=m.getDrawableDynamicFlagIsVisible(i);
+        const ti=m.getDrawableTextureIndex(i);
+        diagLog('DIAG',`  drawable[${i}]: visible=${vis} tex=${ti}`);
+      }
+    } else if(frame%60===0){
+      diagLog('DIAG',`🧪 裸渲染 帧${frame} dc=${gl._drawCallCount()}`);
+    }
+    frame++;
+    animFrameId=requestAnimationFrame(loop);
+  };
+  animFrameId=requestAnimationFrame(loop);
+}
+
+function startLoop(){
+  if(animFrameId)return;
+  let frame=0, hasDrawn=false;
+  const loop=()=>{
+    if(!isReady||!model||!gl){animFrameId=requestAnimationFrame(loop);return}
+    const pc=gl._programCount?gl._programCount():0;
+    if(!hasDrawn){hasDrawn=true;diagLog('RENDER','🎨 开始渲染, programs='+pc)}
+
+    const dt=1/60;
+    const m=model.getModel();
+    try{m.loadParameters()}catch(e){diagLog('LOOP','💥 loadParameters: '+(e.message||e))}
+    try{if(eyeBlink)eyeBlink.updateParameters(m,dt)}catch(e){diagLog('LOOP','💥 eyeBlink: '+(e.message||e))}
+    try{if(breath)breath.updateParameters(m,dt)}catch(e){diagLog('LOOP','💥 breath: '+(e.message||e))}
+    try{if(physics)physics.evaluate(m,dt)}catch(e){diagLog('LOOP','💥 physics: '+(e.message||e))}
+    try{if(pose)pose.updateParameters(m,dt)}catch(e){diagLog('LOOP','💥 pose: '+(e.message||e))}
+    try{if(motionMgr)motionMgr.updateMotion(m,dt)}catch(e){diagLog('LOOP','💥 motionUpdate: '+(e.message||e))}
+    try{m.saveParameters()}catch(e){diagLog('LOOP','💥 saveParameters: '+(e.message||e))}
+    try{m.update()}catch(e){diagLog('LOOP','💥 update: '+(e.message||e))}
+    try{gl.viewport(0,0,gl.canvas.width,gl.canvas.height)}catch(e){diagLog('LOOP','💥 viewport: '+(e.message||e))}
+    try{gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT)}catch(e){diagLog('LOOP','💥 clear: '+(e.message||e))}
+    // ✅ SDK 内部 doDrawModel() 已处理全部 Clipping Mask + FBO 管线，无需外部调用
+    try{renderer.drawModel()}catch(e){diagLog('LOOP','💥 drawModel: '+(e.message||e))}
+    if(frame===0){
+      diagLog('RENDER',`首帧: programs=${pc} drawCalls=${gl._resetDrawCallCount?gl._resetDrawCallCount():'?'} texs=${gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS)}`);
+    } else if(frame%180===0){
+      diagLog('RENDER',`帧 ${frame} dc=${gl._drawCallCount?gl._drawCallCount():'?'}`);
+    }
+    frame++;
+    animFrameId=requestAnimationFrame(loop);
+  };
+  animFrameId=requestAnimationFrame(loop);
+}
+
+// ============================================================
+// 表情过渡
+// ============================================================
+let expressionBlend=1,targetExpression='neutral';
+let currentParams={...EXPRESSION_PARAMS.neutral};
+let cachedParamIds=null;
+function getCachedParamIds(){
+  if(cachedParamIds)return cachedParamIds;
+  const idMgr=CubismFramework.getIdManager();
+  cachedParamIds={};
+  for(const k of Object.keys(EXPRESSION_PARAMS.neutral))cachedParamIds[k]=idMgr.getId(k);
+  return cachedParamIds;
+}
+function applyExpressionBlend(dt,m){
+  if(!model)return;
+  m=m||model.getModel();
+  const target=EXPRESSION_PARAMS[targetExpression]||EXPRESSION_PARAMS.neutral;
+  expressionBlend=Math.min(expressionBlend+dt*3,1);
+  const ids=getCachedParamIds();
+  for(const[key,tv]of Object.entries(target)){
+    currentParams[key]=lerp(currentParams[key]||0,tv,expressionBlend);
+    try{m.setParameterValueById(ids[key],currentParams[key],0.8)}catch(_){}
+  }
+}
+function setExpression(expr){
+  if(!EXPRESSION_PARAMS[expr])return;
+  targetExpression=expr;
+  expressionBlend=0;
+}
+
+// ============================================================
+// 窗口
+// ============================================================
+function resizeCanvas(){
+  const rect=canvas.parentElement.getBoundingClientRect();
+  const dpr=window.devicePixelRatio||1;
+  canvas.width=rect.width*dpr;
+  canvas.height=rect.height*dpr;
+  canvas.style.width=rect.width+'px';
+  canvas.style.height=rect.height+'px';
+  if(gl)gl.viewport(0,0,canvas.width,canvas.height);
+}
+
+// ============================================================
+// JS 桥接
+// ============================================================
+window.live2d={
+  setExpression(expr){setExpression(expr)},
+  setStatus(text){
+    statusEl.textContent=text||'';
+    statusEl.classList.toggle('visible',!!text);
+    if(statusTimeout)clearTimeout(statusTimeout);
+    if(text)statusTimeout=setTimeout(()=>statusEl.classList.remove('visible'),5000);
+  },
+  startMotion(group){startMotion(group)},
+  isReady(){return isReady},
+  getDiag(){return diagLines.join('\n')},
+};
+
+// ============================================================
+// 启动
+// ============================================================
+async function main(){
+  try{
+    diagLog('MAIN','开始初始化...');
+    if(!initWebGL()){diagLog('FATAL','WebGL 初始化失败');return}
+    if(!initCubism()){diagLog('FATAL','Cubism 初始化失败');return}
+    resizeCanvas();
+    window.addEventListener('resize',resizeCanvas);
+    await loadModel();
+    diagLog('MAIN','全部完成 🎉');
+    // 通知 Swift 模型真正加载完成
+    try{
+      if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.avatarReady){
+        window.webkit.messageHandlers.avatarReady.postMessage({ready:true});
+      }
+    }catch(e){diagLog('BRIDGE','webkit postMessage 失败: '+e.message)}
+  }catch(e){
+    diagLog('FATAL',e.message+'\n'+(e.stack||'').substring(0,300));
+    // 失败也通知 Swift
+    try{
+      if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.avatarReady){
+        window.webkit.messageHandlers.avatarReady.postMessage({ready:false,error:e.message});
+      }
+    }catch(_e){}
+  }
+}
+// main() 由 Swift 在数据注入后调用
+</script>
+</body>
+</html>
