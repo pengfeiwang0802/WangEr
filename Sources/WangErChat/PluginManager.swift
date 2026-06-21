@@ -84,6 +84,8 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
     private var currentStyle: DisplayStyle = .chineseStandard
     /// 持有布局切换按钮引用，方便更新 label
     private weak var layoutToolbarItem: NSToolbarItem?
+    /// 编剧助手 WKWebView 引用（供原生控件调用 JS）
+    private weak var scriptwritingWebView: WKWebView?
     /// 模板管理窗口关闭观察者
     private var templateManagerCloseObserver: NSObjectProtocol?
 
@@ -98,17 +100,30 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
         window.minSize = NSSize(width: 780, height: 500)
         window.center()
 
+        guard let contentView = window.contentView else { return window }
+
+        // 原生模式切换控件（放在 webView 上方，不用 toolbar item 避免点击事件被吞）
+        let modeSwitch = NSSegmentedControl(labels: ["📋 时间轴", "📄 剧本"],
+                                            trackingMode: .selectOne,
+                                            target: self,
+                                            action: #selector(modeSwitchChanged(_:)))
+        modeSwitch.selectedSegment = 0
+        modeSwitch.segmentStyle = .texturedRounded
+        modeSwitch.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(modeSwitch)
+
         let webView = WKWebView(frame: .zero)
         webView.translatesAutoresizingMaskIntoConstraints = false
 
         // 透明背景，让 HTML 的深色主题透出
         webView.setValue(false, forKey: "drawsBackground")
-
-        guard let contentView = window.contentView else { return window }
         contentView.addSubview(webView)
 
         NSLayoutConstraint.activate([
-            webView.topAnchor.constraint(equalTo: contentView.topAnchor),
+            modeSwitch.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
+            modeSwitch.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
+
+            webView.topAnchor.constraint(equalTo: modeSwitch.bottomAnchor, constant: 8),
             webView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             webView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
@@ -117,7 +132,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
         // 先加载默认空布局
         webView.loadHTMLString(ScriptwritingLayout.html, baseURL: nil)
 
-        // 添加工具栏按钮（通过 WKWebView 的 JS 通信，或直接加 NSButton 到 window）
+        // 工具栏（文件操作按钮）
         setupToolbar(in: window, webView: webView)
 
         // 恢复上次打开的 .sws 文件（如果有）
@@ -129,6 +144,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
     // MARK: - 工具栏
 
     private func setupToolbar(in window: NSWindow, webView: WKWebView) {
+        scriptwritingWebView = webView
         let toolbar = NSToolbar(identifier: "ScriptwritingToolbar")
         toolbar.delegate = self
         toolbar.allowsUserCustomization = false
@@ -206,13 +222,30 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
         let characterColors = SWSRenderer.buildCharacterColorMap(document: document)
 
         let bodyHTML = SWSRenderer.renderBody(document: document, style: currentStyle, characterColors: characterColors)
-        // 通过 JS 只替换编辑器区域，保留 UI 布局
-        let escaped = bodyHTML
+        // 还原 title/author（renderBody 不含，需要 full render 提取）
+        let fullHTML = SWSRenderer.render(document: document, style: currentStyle, characterColors: characterColors)
+
+        // 从 fullHTML 中提取 title 和 author（用于编辑器头）
+        let titleMatch = fullHTML.range(of: "<div class='sws-title'[^>]*>([\\s\\S]*?)</div>", options: .regularExpression)
+        let authorMatch = fullHTML.range(of: "<div class='sws-author'[^>]*>([\\s\\S]*?)</div>", options: .regularExpression)
+        let titleHTML = titleMatch.flatMap { String(fullHTML[$0]) } ?? ""
+        let authorHTML = authorMatch.flatMap { String(fullHTML[$0]) } ?? ""
+
+        let escapedBody = bodyHTML
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "\n", with: "\\n")
             .replacingOccurrences(of: "\r", with: "")
-        let js = "document.getElementById('editor-body').innerHTML = \"\(escaped)\";"
+        let escapedFull = (titleHTML + authorHTML + bodyHTML)
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "")
+
+        // 渲染到剧本预览
+        let js = """
+        document.getElementById('script-wrapper').innerHTML = "\(escapedFull)";
+        """
         webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
@@ -584,6 +617,49 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
         fallbackToggleLayout()
     }
 
+    /// 原生 NSSegmentedControl 切换时间轴/剧本模式
+    /// 直接操作 DOM，不依赖 window.onModeChange（避免 WKWebView JS 函数引用丢失问题）
+    @objc func modeSwitchChanged(_ sender: NSSegmentedControl) {
+        let isTimeline = sender.selectedSegment == 0
+        let mode = isTimeline ? "timeline" : "script"
+        print("[PluginManager] modeSwitchChanged: \(mode), webView=\(scriptwritingWebView != nil ? "OK" : "NIL")")
+
+        // 在 Swift 端决定模式布尔值，JS 端只做 DOM 操作（零依赖，全直接）
+        let js = """
+        (function() {
+            var isTimeline = \(isTimeline ? "true" : "false");
+            var tla = document.getElementById('timeline-area');
+            var sca = document.getElementById('script-area');
+            var sdb = document.getElementById('sidebar');
+            var hdl = document.getElementById('resize-handle');
+            var lbl = document.getElementById('mode-label');
+            var btn = document.getElementById('btn-toggle-sidebar');
+
+            if (tla) tla.style.display = isTimeline ? 'flex' : 'none';
+            if (sca) sca.style.display = isTimeline ? 'none' : '';
+            if (sdb) {
+                if (isTimeline) { sdb.classList.remove('collapsed'); }
+                else { sdb.classList.add('collapsed'); }
+            }
+            if (hdl) hdl.style.display = isTimeline ? '' : 'none';
+            if (lbl) lbl.textContent = isTimeline ? '📋 时间轴（编辑）' : '📄 剧本（只读预览）';
+            if (btn) btn.textContent = '📂';
+
+            // 切换到剧本模式时，刷新预览
+            if (!isTimeline && typeof window._renderScriptPreview === 'function') {
+                window._renderScriptPreview();
+            }
+        })();
+        """
+        scriptwritingWebView?.evaluateJavaScript(js) { result, error in
+            if let error = error {
+                print("[PluginManager] modeSwitchChanged JS error: \(error.localizedDescription)")
+            } else {
+                print("[PluginManager] modeSwitchChanged JS OK, result=\(result ?? "nil")")
+            }
+        }
+    }
+
     @objc func popUpLayoutChanged(_ sender: NSPopUpButton) {
         guard let selectedItem = sender.selectedItem,
               let style = selectedItem.representedObject as? DisplayStyle else { return }
@@ -719,7 +795,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
 
 extension ScriptwritingPlugin: NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .openFile, .reload, .saveFile, .toggleLayout, .flexibleSpace]
+        [.flexibleSpace, .openFile, .reload, .saveFile, .toggleLayout]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -777,6 +853,7 @@ extension ScriptwritingPlugin: NSToolbarDelegate {
 }
 
 private extension NSToolbarItem.Identifier {
+    static let modeSwitch = NSToolbarItem.Identifier("com.wanger.modeSwitch")
     static let openFile = NSToolbarItem.Identifier("com.wanger.openSWS")
     static let reload = NSToolbarItem.Identifier("com.wanger.reloadSWS")
     static let toggleLayout = NSToolbarItem.Identifier("com.wanger.toggleLayout")
@@ -819,7 +896,6 @@ enum ScriptwritingLayout {
                 display: flex;
                 flex-direction: column;
                 overflow: hidden;
-                user-select: none;
             }
 
             /* ========== 剧情轴 Topbar（时间轴） ========== */
@@ -1004,97 +1080,7 @@ enum ScriptwritingLayout {
                 opacity: 0;
             }
 
-            /* ========== 场次 Topbar ========== */
-            #topbar {
-                height: var(--topbar-h);
-                min-height: var(--topbar-h);
-                background: var(--bg-secondary);
-                border-bottom: 1px solid var(--border);
-                display: flex;
-                align-items: center;
-                padding: 0 16px;
-                gap: 12px;
-                z-index: 10;
-            }
-            #topbar .scene-label {
-                font-size: 0.75em;
-                color: var(--text-muted);
-                text-transform: uppercase;
-                letter-spacing: 1px;
-            }
-            #topbar .scene-selector {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                flex: 1;
-            }
-            #topbar .scene-nav {
-                width: 28px; height: 28px;
-                border-radius: 6px;
-                border: 1px solid var(--border);
-                background: var(--bg-tertiary);
-                color: var(--text-secondary);
-                cursor: pointer;
-                font-size: 0.85em;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                transition: all 0.15s;
-            }
-            #topbar .scene-nav:hover {
-                background: var(--accent-soft);
-                border-color: var(--accent);
-                color: var(--accent);
-            }
-            #topbar .scene-title {
-                font-size: 0.95em;
-                font-weight: 600;
-                color: var(--text-primary);
-                padding: 4px 10px;
-                border-radius: 4px;
-                background: transparent;
-                border: 1px solid transparent;
-                cursor: text;
-                min-width: 120px;
-            }
-            #topbar .scene-title:hover {
-                background: var(--bg-tertiary);
-            }
-            #topbar .scene-meta {
-                font-size: 0.8em;
-                color: var(--text-muted);
-                display: flex;
-                gap: 6px;
-            }
-            #topbar .scene-meta span {
-                padding: 2px 8px;
-                border-radius: 4px;
-                background: var(--bg-tertiary);
-                border: 1px solid var(--border);
-                font-size: 0.85em;
-            }
-            #topbar .divider {
-                width: 1px;
-                height: 20px;
-                background: var(--border);
-                margin: 0 4px;
-            }
-            #topbar .btn-build {
-                margin-left: auto;
-                padding: 5px 14px;
-                border-radius: 6px;
-                border: 1px solid var(--accent);
-                background: var(--accent-soft);
-                color: var(--accent);
-                font-size: 0.85em;
-                font-weight: 600;
-                cursor: pointer;
-                transition: all 0.15s;
-            }
-            #topbar .btn-build:hover {
-                background: var(--accent);
-                color: #fff;
-            }
+
 
             /* ========== Main Body ========== */
             #main-body {
@@ -1220,65 +1206,255 @@ enum ScriptwritingLayout {
                 color: var(--text-primary);
             }
 
-            /* ========== Editor ========== */
-            #editor-area {
+            /* ========== 模式切换栏（显示区左上方） ========== */
+            #mode-toolbar {
+                height: 34px;
+                min-height: 34px;
+                background: var(--bg-secondary);
+                border-bottom: 1px solid var(--border);
+                display: flex;
+                align-items: center;
+                padding: 0 16px;
+                gap: 6px;
+                position: relative;
+                z-index: 20;
+            }
+            #mode-toolbar .mode-label {
+                font-size: 0.7em;
+                color: var(--text-muted);
+                margin-left: auto;
+                opacity: 0.5;
+            }
+
+            /* ========== Timeline 视图 ========== */
+            #timeline-area {
                 flex: 1;
                 display: flex;
                 flex-direction: column;
                 overflow: hidden;
-                background: var(--bg-editor);
-            }
-            #editor-area .editor-toolbar {
-                height: 32px;
-                min-height: 32px;
                 background: var(--bg-primary);
+            }
+            .timeline-header {
+                padding: 12px 20px 8px;
                 border-bottom: 1px solid var(--border);
                 display: flex;
-                align-items: center;
-                padding: 0 12px;
-                gap: 6px;
+                align-items: baseline;
+                gap: 10px;
             }
-            #editor-area .editor-toolbar button {
-                width: 26px; height: 24px;
-                border-radius: 4px;
-                border: none;
-                background: transparent;
+            .timeline-title {
+                font-size: 0.9em;
+                font-weight: 700;
+                color: var(--text-primary);
+            }
+            .timeline-subtitle {
+                font-size: 0.7em;
+                color: var(--text-muted);
+            }
+            .timeline-scroll {
+                flex: 1;
+                overflow-y: auto;
+                padding: 16px 20px;
+                display: flex;
+                flex-direction: column;
+                gap: 14px;
+            }
+
+            /* 场景卡片 */
+            .scene-card {
+                background: var(--bg-secondary);
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                overflow: hidden;
+                transition: border-color 0.15s;
+            }
+            .scene-card:hover {
+                border-color: var(--accent);
+            }
+            .scene-card-header {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 10px 14px;
+                background: var(--bg-tertiary);
+                border-bottom: 1px solid var(--border);
+            }
+            .scene-number { flex-shrink: 0; }
+            .scene-num-circle {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 30px;
+                height: 30px;
+                border-radius: 50%;
+                background: var(--accent);
+                color: #fff;
+                font-weight: 700;
+                font-size: 0.85em;
+            }
+            .scene-meta-fields {
+                display: flex;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+            .scene-tag {
+                padding: 3px 10px;
+                border-radius: 5px;
+                font-size: 0.78em;
+                font-weight: 600;
+                background: var(--bg-secondary);
+                border: 1px solid var(--border);
                 color: var(--text-secondary);
-                cursor: pointer;
+            }
+            .scene-tag.ie-tag { color: #f5a623; }
+            .scene-tag.loc-tag { color: #a0a0b0; }
+            .scene-tag.time-tag { color: #6a9fc5; }
+
+            .scene-card-body {
+                padding: 8px 14px 12px;
+                display: flex;
+                flex-direction: column;
+                gap: 2px;
+            }
+
+            /* Timeline 行块 */
+            .tl-block {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 6px 8px;
+                border-radius: 5px;
+                font-size: 0.88em;
+                line-height: 1.5;
+            }
+            .tl-block-icon {
+                width: 22px;
+                flex-shrink: 0;
+                text-align: center;
                 font-size: 0.8em;
+                opacity: 0.6;
+            }
+            .tl-block.tl-action {
+                color: #9cb89c;
+            }
+            .tl-block.tl-dialogue {
+                color: #7eb8da;
+            }
+            .tl-block.tl-dialogue-text {
+                color: var(--text-primary);
+                padding-left: 30px;
+                border-left: 2px solid var(--border);
+                margin-left: 7px;
+            }
+            .tl-char-name {
+                font-weight: 600;
+                color: #e8a44a;
+            }
+            .tl-char-mod {
+                font-size: 0.85em;
+                color: var(--text-muted);
+            }
+            .tl-block-text {
+                color: var(--text-secondary);
+            }
+            .tl-block.tl-dialogue-text .tl-block-text {
+                color: var(--text-primary);
+            }
+
+            /* 添加新场卡片 */
+            .add-scene-card {
                 display: flex;
                 align-items: center;
                 justify-content: center;
-                transition: all 0.12s;
+                gap: 8px;
+                padding: 14px;
+                border: 2px dashed var(--border);
+                border-radius: 10px;
+                cursor: pointer;
+                transition: all 0.15s;
+                color: var(--text-muted);
+                font-size: 0.85em;
             }
-            #editor-area .editor-toolbar button:hover {
-                background: var(--bg-tertiary);
-                color: var(--text-primary);
+            .add-scene-card:hover {
+                border-color: var(--accent);
+                color: var(--accent);
+                background: var(--accent-soft);
             }
-            #editor-area .editor-toolbar .sep {
-                width: 1px; height: 16px;
-                background: var(--border);
-                margin: 0 4px;
-            }
-            #editor-area .editor-body {
-                flex: 1;
-                overflow-y: auto;
-                padding: 20px;
-                background: #ffffff;
-                color: #1a1a1a;
-            }
-            #editor-area .editor-body:focus {
-                outline: none;
+            .add-scene-icon {
+                font-size: 1.2em;
+                font-weight: 300;
             }
 
-            /* SWS 结构性规则（仅文本换行/间距，不覆盖内联样式） */
-            #editor-area .editor-body .sws-dialogue-text,
-            #editor-area .editor-body .sws-action,
-            #editor-area .editor-body .sws-unattributed {
-                white-space: pre-wrap;
-                word-wrap: break-word;
+            /* ========== 剧本预览（只读） ========== */
+            #script-area {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                overflow-y: auto;
+                background: #fafafa;
+                padding: 0;
             }
-            #editor-area .editor-body .sws-empty-line { height: 1em; }
+            #script-area .script-wrapper {
+                max-width: 680px;
+                margin: 40px auto;
+                padding: 60px 50px;
+                background: #ffffff;
+                box-shadow: 0 2px 20px rgba(0,0,0,0.06);
+                border-radius: 2px;
+                color: #1a1a1a;
+                font-size: 15px;
+                line-height: 1.8;
+                font-family: "PingFang SC", "Noto Serif SC", "Songti SC", Georgia, serif;
+                min-height: 100%;
+            }
+
+            /* 底部时间轴 */
+            .timeline-axis {
+                height: 64px;
+                min-height: 64px;
+                background: var(--bg-secondary);
+                border-top: 1px solid var(--border);
+                display: flex;
+                align-items: center;
+                padding: 0 28px;
+            }
+            .axis-line {
+                width: 100%;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+            }
+            .axis-dot {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 4px;
+                cursor: pointer;
+                position: relative;
+            }
+            .axis-dot-circle {
+                width: 14px;
+                height: 14px;
+                border-radius: 50%;
+                background: var(--accent);
+                border: 2px solid var(--bg-secondary);
+                transition: all 0.15s;
+            }
+            .axis-dot:hover .axis-dot-circle {
+                transform: scale(1.3);
+                background: #ff5a70;
+            }
+            .axis-dot-label {
+                font-size: 0.65em;
+                color: var(--text-muted);
+                white-space: nowrap;
+            }
+            .axis-connector {
+                flex: 1;
+                height: 2px;
+                background: var(--border);
+                margin: 0 -20px;
+                margin-bottom: 20px;
+            }
 
             /* ========== 侧边栏折叠 ========== */
             #sidebar.collapsed {
@@ -1319,122 +1495,139 @@ enum ScriptwritingLayout {
                 <span class="hint">Build 后自动生成</span>
             </div>
             <div class="toggles" id="curve-toggles">
-                <button class="toggle on" data-char="zhangsan">
-                    <span class="dot" style="color:#e8a44a;"></span> 张三
+                <button class="toggle on" data-char="zhengyiyuan">
+                    <span class="dot" style="color:#e8a44a;"></span> 郑希远
                 </button>
-                <button class="toggle on" data-char="lisi">
-                    <span class="dot" style="color:#6a9fc5;"></span> 李四
+                <button class="toggle on" data-char="xiangnan">
+                    <span class="dot" style="color:#6a9fc5;"></span> 向南
                 </button>
-                <button class="toggle on" data-char="wangwu">
-                    <span class="dot" style="color:#7a7a9a;"></span> 王五
+                <button class="toggle on" data-char="linxiaoyu">
+                    <span class="dot" style="color:#b87a9a;"></span> 林小雨
+                </button>
+                <button class="toggle on" data-char="chenshu">
+                    <span class="dot" style="color:#8a8aaa;"></span> 陈叔
                 </button>
             </div>
         </div>
         <div class="storybar-timeline" id="timeline">
             <!-- 剧情块 -->
             <div class="story-blocks">
-                <div class="story-block" data-tone="warm" style="width:22%;" data-scene="1" title="开场 · 建立世界观">
-                    <span class="block-label">开端</span>
-                    <span class="block-tone">暖 · 希望</span>
+                <div class="story-block" data-tone="warm" style="width:17%;" data-scene="1" title="书房诀别">
+                    <span class="block-label">诀别</span>
+                    <span class="block-tone">暖 · 不舍</span>
                 </div>
-                <div class="story-block" data-tone="cool" style="width:30%;" data-scene="2" title="冲突升级 · 人物成长">
-                    <span class="block-label">发展</span>
-                    <span class="block-tone">冷 · 挣扎</span>
+                <div class="story-block" data-tone="cool" style="width:17%;" data-scene="2" title="码头回忆">
+                    <span class="block-label">回忆</span>
+                    <span class="block-tone">冷 · 追思</span>
                 </div>
-                <div class="story-block" data-tone="hot" style="width:24%;" data-scene="3" title="最大冲突 · 命运转折">
-                    <span class="block-label">高潮</span>
-                    <span class="block-tone">灼 · 激化</span>
+                <div class="story-block" data-tone="tense" style="width:17%;" data-scene="3" title="孤独等待">
+                    <span class="block-label">等待</span>
+                    <span class="block-tone">郁 · 孤独</span>
                 </div>
-                <div class="story-block" data-tone="calm" style="width:24%;" data-scene="4" title="冲突解决 · 新平衡">
-                    <span class="block-label">结局</span>
-                    <span class="block-tone">静 · 释然</span>
+                <div class="story-block" data-tone="warm" style="width:17%;" data-scene="4" title="茶馆揭示">
+                    <span class="block-label">揭示</span>
+                    <span class="block-tone">暖 · 曙光</span>
+                </div>
+                <div class="story-block" data-tone="hot" style="width:17%;" data-scene="5" title="轮渡抉择">
+                    <span class="block-label">抉择</span>
+                    <span class="block-tone">灼 · 新生</span>
+                </div>
+                <div class="story-block" data-tone="cool" style="width:15%;" data-scene="6" title="身世之谜">
+                    <span class="block-label">谜底</span>
+                    <span class="block-tone">静 · 悬念</span>
                 </div>
             </div>
             <!-- 关键帧 -->
             <div class="keyframe-layer">
-                <div class="keyframe-marker" style="left:11%;" data-scene="1" title="故事开始">
+                <div class="keyframe-marker" style="left:8%;" data-scene="1" title="郑希远催促向南离开">
                     <div class="pin"></div>
-                    <span class="kf-label">开场</span>
+                    <span class="kf-label">离别</span>
                 </div>
-                <div class="keyframe-marker" style="left:37%;" data-scene="2" title="突发事件打破日常">
+                <div class="keyframe-marker" style="left:25%;" data-scene="2" title="码头回忆往事">
                     <div class="pin"></div>
-                    <span class="kf-label">突发事件</span>
+                    <span class="kf-label">往事</span>
                 </div>
-                <div class="keyframe-marker" style="left:64%;" data-scene="3" title="人物关系重大转折">
+                <div class="keyframe-marker" style="left:42%;" data-scene="3" title="林小雨收到信">
                     <div class="pin"></div>
-                    <span class="kf-label">人物背叛</span>
+                    <span class="kf-label">信</span>
                 </div>
-                <div class="keyframe-marker" style="left:88%;" data-scene="4" title="最终和解">
+                <div class="keyframe-marker" style="left:58%;" data-scene="4" title="陈叔交出怀表">
                     <div class="pin"></div>
-                    <span class="kf-label">和解</span>
+                    <span class="kf-label">怀表</span>
+                </div>
+                <div class="keyframe-marker" style="left:75%;" data-scene="5" title="向南登上轮渡">
+                    <div class="pin"></div>
+                    <span class="kf-label">启程</span>
+                </div>
+                <div class="keyframe-marker" style="left:92%;" data-scene="6" title="怀表里的秘密">
+                    <div class="pin"></div>
+                    <span class="kf-label">秘密</span>
                 </div>
             </div>
             <!-- 情绪曲线 -->
             <div class="curve-layer">
                 <svg viewBox="0 0 1000 50" preserveAspectRatio="none">
-                    <!-- 张三 情绪曲线（暖橙） -->
-                    <path class="curve-line" id="curve-zhangsan"
-                        d="M0,30 C120,28 180,20 260,25 C340,30 380,40 480,35 C580,30 620,8 720,15 C820,22 900,18 1000,25"
+                    <path class="curve-line" id="curve-zhengyiyuan"
+                        d="M0,30 C80,28 120,20 190,22 C260,28 320,38 400,30 C480,22 520,8 600,15 C680,25 720,12 800,18 C880,24 940,20 1000,25"
                         stroke="#e8a44a" />
-                    <!-- 李四 情绪曲线（冷蓝） -->
-                    <path class="curve-line" id="curve-lisi"
-                        d="M0,22 C100,20 160,32 250,28 C340,24 400,12 500,20 C600,28 660,38 760,30 C860,22 920,18 1000,22"
+                    <path class="curve-line" id="curve-xiangnan"
+                        d="M0,18 C60,16 100,28 180,20 C260,12 320,5 400,18 C480,32 540,38 620,28 C700,20 760,8 840,15 C920,22 980,18 1000,20"
                         stroke="#6a9fc5" />
-                    <!-- 王五 情绪曲线（灰紫） -->
-                    <path class="curve-line" id="curve-wangwu"
-                        d="M0,18 C140,16 200,34 300,22 C400,10 460,5 560,15 C660,25 720,35 820,28 C920,21 980,20 1000,22"
+                    <path class="curve-line" id="curve-linxiaoyu"
+                        d="M0,22 C140,24 200,34 300,28 C400,22 480,8 580,18 C680,28 740,40 820,32 C900,24 960,22 1000,18"
+                        stroke="#b87a9a" />
+                    <path class="curve-line" id="curve-chenshu"
+                        d="M0,35 C200,32 300,28 440,22 C520,18 560,14 620,20 C680,28 720,32 800,28 C880,24 940,22 1000,25"
                         stroke="#8a8aaa" />
                 </svg>
             </div>
         </div>
     </div>
 
-    <!-- ===== 场次 Topbar ===== -->
-    <div id="topbar">
-        <span class="scene-label">📍 当前场次</span>
-        <div class="scene-selector">
-            <button class="scene-nav" title="上一场">◀</button>
-            <div class="scene-title" contenteditable="true">第 1 场 · 开场</div>
-            <button class="scene-nav" title="下一场">▶</button>
-        </div>
-        <div class="divider"></div>
-        <div class="scene-meta">
-            <span>🏠 内景</span>
-            <span>☀️ 白天</span>
-        </div>
-        <button class="btn-build" title="AI 分析剧本一致性">🔍 Build</button>
+    <!-- ===== 显示区模式切换栏 ===== -->
+    <div id="mode-toolbar">
+        <span class="mode-label" id="mode-label">📋 时间轴（编辑）</span>
+        <span style="flex:1;"></span>
+        <button title="折叠侧边栏" id="btn-toggle-sidebar">📂</button>
     </div>
 
-    <!-- ===== Main Body ===== -->
+    <!-- ===== Main Body（显示区） ===== -->
     <div id="main-body">
 
         <!-- ===== Sidebar ===== -->
         <div id="sidebar">
             <div class="sidebar-header">
                 <span>👥 角色</span>
-                <span class="count">3</span>
+                <span class="count">4</span>
                 <button class="add-char" title="添加角色">+</button>
             </div>
             <div class="char-list" id="char-list">
-                <div class="char-item active" data-char="zhangsan">
+                <div class="char-item active" data-char="zhengyiyuan">
                     <div class="avatar">🧔</div>
                     <div class="info">
-                        <div class="name">张三</div>
-                        <div class="role">主角 · 男 · 32岁</div>
+                        <div class="name">郑希远</div>
+                        <div class="role">主角 · 男 · 35岁</div>
                     </div>
                 </div>
-                <div class="char-item" data-char="lisi">
+                <div class="char-item" data-char="xiangnan">
+                    <div class="avatar">👨</div>
+                    <div class="info">
+                        <div class="name">向南</div>
+                        <div class="role">主角 · 男 · 33岁</div>
+                    </div>
+                </div>
+                <div class="char-item" data-char="linxiaoyu">
                     <div class="avatar">👩</div>
                     <div class="info">
-                        <div class="name">李四</div>
-                        <div class="role">配角 · 女 · 28岁</div>
+                        <div class="name">林小雨</div>
+                        <div class="role">主角 · 女 · 19岁</div>
                     </div>
                 </div>
-                <div class="char-item" data-char="wangwu">
+                <div class="char-item" data-char="chenshu">
                     <div class="avatar">👨‍🦳</div>
                     <div class="info">
-                        <div class="name">王五</div>
-                        <div class="role">配角 · 男 · 55岁</div>
+                        <div class="name">陈叔</div>
+                        <div class="role">配角 · 男 · 58岁</div>
                     </div>
                 </div>
             </div>
@@ -1447,21 +1640,178 @@ enum ScriptwritingLayout {
         <!-- ===== Resize Handle ===== -->
         <div id="resize-handle"></div>
 
-        <!-- ===== Editor ===== -->
-        <div id="editor-area">
-            <div class="editor-toolbar">
-                <button title="场景标题">🎬</button>
-                <button title="动作/描述">📝</button>
-                <button title="角色名">👤</button>
-                <button title="台词">💬</button>
-                <button title="转场">🔄</button>
-                <span class="sep"></span>
-                <button title="加粗"><b>B</b></button>
-                <button title="斜体"><i>I</i></button>
-                <span class="sep"></span>
-                <button title="折叠侧边栏" id="btn-toggle-sidebar">📂</button>
+        <!-- ===== Timeline View（时间轴编辑模式） ===== -->
+        <div id="timeline-area">
+            <div class="timeline-header">
+                <span class="timeline-title">📋 时间轴</span>
+                <span class="timeline-subtitle">场景概览</span>
             </div>
-            <div class="editor-body" contenteditable="true" id="editor-body"></div>
+            <div class="timeline-scroll" id="timeline-scroll">
+
+                <!-- 第1场 -->
+                <div class="scene-card" data-scene="1" id="timeline-scene-1">
+                    <div class="scene-card-header">
+                        <div class="scene-number"><span class="scene-num-circle">1</span></div>
+                        <div class="scene-meta-fields">
+                            <span class="scene-tag ie-tag">🏠 内景</span>
+                            <span class="scene-tag loc-tag">书房</span>
+                            <span class="scene-tag time-tag">☀️ 日</span>
+                        </div>
+                    </div>
+                    <div class="scene-card-body">
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">老陈站在书架前，手指划过一排排泛黄的书脊。窗外梧桐叶落了大半。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">郑希远</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">走吧。再不走就赶不上船了。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">向南</span><span class="tl-char-mod">（抬头看了一眼）</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">我还没想好。</span></div>
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">郑希远叹了口气，把手里的烟掐灭在窗台上。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">郑希远</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">你想了一年了。</span></div>
+                    </div>
+                </div>
+
+                <!-- 第2场 -->
+                <div class="scene-card" data-scene="2" id="timeline-scene-2">
+                    <div class="scene-card-header">
+                        <div class="scene-number"><span class="scene-num-circle">2</span></div>
+                        <div class="scene-meta-fields">
+                            <span class="scene-tag ie-tag">🌃 外景</span>
+                            <span class="scene-tag loc-tag">码头</span>
+                            <span class="scene-tag time-tag">🌅 黄昏</span>
+                        </div>
+                    </div>
+                    <div class="scene-card-body">
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">江水浑浊，汽笛声由远及近。挑夫们扛着麻袋在跳板上穿梭。远处的城市在天际线若隐若现。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">郑希远</span><span class="tl-char-mod">（望着江水）</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">你还记得咱们第一次来这儿的模样吗？那时候码头还没这么乱。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">向南</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">都变了。</span></div>
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">一个卖橘子的老妇人从他们身边走过，向南买了两斤。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">向南</span><span class="tl-char-mod">（剥着橘子）</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">那时候你身上一共就五块钱。全买了橘子。</span></div>
+                    </div>
+                </div>
+
+                <!-- 第3场 -->
+                <div class="scene-card" data-scene="3" id="timeline-scene-3">
+                    <div class="scene-card-header">
+                        <div class="scene-number"><span class="scene-num-circle">3</span></div>
+                        <div class="scene-meta-fields">
+                            <span class="scene-tag ie-tag">🏠 内景</span>
+                            <span class="scene-tag loc-tag">林小雨家客厅</span>
+                            <span class="scene-tag time-tag">🌙 夜</span>
+                        </div>
+                    </div>
+                    <div class="scene-card-body">
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">林小雨坐在沙发上，手里握着一封已经拆开的信。茶几上的茶早就凉了。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">林小雨</span><span class="tl-char-mod">（自言自语）</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">他说"很快回来"……那是春天的事了。</span></div>
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">门外传来脚步声。林小雨迅速把信塞进抽屉，擦了擦眼角。</span></div>
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">敲门声响起。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">陈叔</span><span class="tl-char-mod">（门外）</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">小雨，在家吗？我带了点桂花糕。</span></div>
+                    </div>
+                </div>
+
+                <!-- 第4场 -->
+                <div class="scene-card" data-scene="4" id="timeline-scene-4">
+                    <div class="scene-card-header">
+                        <div class="scene-number"><span class="scene-num-circle">4</span></div>
+                        <div class="scene-meta-fields">
+                            <span class="scene-tag ie-tag">🏠 内景</span>
+                            <span class="scene-tag loc-tag">茶馆</span>
+                            <span class="scene-tag time-tag">☀️ 日</span>
+                        </div>
+                    </div>
+                    <div class="scene-card-body">
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">茶馆里烟雾缭绕，评弹声从二楼飘下来。陈叔给林小雨倒了杯茶。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">陈叔</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">你爸走之前，在我这存了一样东西。</span></div>
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">他从怀里掏出一个布包，层层打开，里面是一块怀表。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">林小雨</span><span class="tl-char-mod">（接过怀表，手指颤抖）</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">这是他随身带了二十年的那块表。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">陈叔</span><span class="tl-char-mod">（低声）</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">表壳里藏了东西。他说等你二十岁才能给你。</span></div>
+                    </div>
+                </div>
+
+                <!-- 第5场 -->
+                <div class="scene-card" data-scene="5" id="timeline-scene-5">
+                    <div class="scene-card-header">
+                        <div class="scene-number"><span class="scene-num-circle">5</span></div>
+                        <div class="scene-meta-fields">
+                            <span class="scene-tag ie-tag">🌃 外景</span>
+                            <span class="scene-tag loc-tag">长江轮渡</span>
+                            <span class="scene-tag time-tag">🌅 黎明</span>
+                        </div>
+                    </div>
+                    <div class="scene-card-body">
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">轮渡在晨雾中缓缓离岸。向南靠在船舷上，手里攥着那张皱巴巴的船票。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">郑希远</span><span class="tl-char-mod">（从船舱走出来）</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">你终于上船了。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">向南</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">我想通了。有些事不是等就能等来的。</span></div>
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">太阳从江面升起，金黄的光铺满整个江面。向南眯起眼睛望着对岸。那里是新的城市，新的生活。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">郑希远</span><span class="tl-char-mod">（笑）</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">我就知道你会来。橘子都给你买好了。</span></div>
+                    </div>
+                </div>
+
+                <!-- 第6场 -->
+                <div class="scene-card" data-scene="6" id="timeline-scene-6">
+                    <div class="scene-card-header">
+                        <div class="scene-number"><span class="scene-num-circle">6</span></div>
+                        <div class="scene-meta-fields">
+                            <span class="scene-tag ie-tag">🏠 内景</span>
+                            <span class="scene-tag loc-tag">林小雨家</span>
+                            <span class="scene-tag time-tag">🌙 夜</span>
+                        </div>
+                    </div>
+                    <div class="scene-card-body">
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">林小雨用颤抖的手打开怀表后盖。里面是一张泛黄的照片——年轻时的父亲，怀里抱着一个婴儿。</span></div>
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">照片背面写着一行字：「小雨，你不是一个人。」</span></div>
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">她把照片翻过来。婴儿的眼睛很像她的。</span></div>
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">照片右边站着另一个穿旗袍的女人。不是她妈妈。</span></div>
+                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">林小雨</span><span class="tl-char-mod">（对着照片）</span></div>
+                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">你到底是谁……</span></div>
+                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">窗外，秋雨细密地敲打着玻璃。桌上的桂花糕没人动过。</span></div>
+                    </div>
+                </div>
+
+                <!-- 加场按钮 -->
+                <div class="add-scene-card" title="添加新场">
+                    <span class="add-scene-icon">＋</span>
+                    <span class="add-scene-label">添加新场</span>
+                </div>
+
+            </div>
+
+            <!-- 底部时间轴 -->
+            <div class="timeline-axis">
+                <div class="axis-line">
+                    <div class="axis-dot" data-scene="1" title="第1场 · 书房 · 日"><span class="axis-dot-circle"></span><span class="axis-dot-label">第1场</span></div>
+                    <div class="axis-connector"></div>
+                    <div class="axis-dot" data-scene="2" title="第2场 · 码头 · 黄昏"><span class="axis-dot-circle"></span><span class="axis-dot-label">第2场</span></div>
+                    <div class="axis-connector"></div>
+                    <div class="axis-dot" data-scene="3" title="第3场 · 林小雨家 · 夜"><span class="axis-dot-circle"></span><span class="axis-dot-label">第3场</span></div>
+                    <div class="axis-connector"></div>
+                    <div class="axis-dot" data-scene="4" title="第4场 · 茶馆 · 日"><span class="axis-dot-circle"></span><span class="axis-dot-label">第4场</span></div>
+                    <div class="axis-connector"></div>
+                    <div class="axis-dot" data-scene="5" title="第5场 · 轮渡 · 黎明"><span class="axis-dot-circle"></span><span class="axis-dot-label">第5场</span></div>
+                    <div class="axis-connector"></div>
+                    <div class="axis-dot" data-scene="6" title="第6场 · 林小雨家 · 夜"><span class="axis-dot-circle"></span><span class="axis-dot-label">第6场</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== 剧本预览（只读） ===== -->
+        <div id="script-area" style="display:none;">
+            <div class="script-wrapper" id="script-wrapper">
+                <div style="text-align:center;padding:80px 0;color:#999;">
+                    <p style="font-size:1.2em;margin-bottom:8px;">📄 剧本预览</p>
+                    <p style="font-size:0.85em;">打开 .sws 文件后自动渲染</p>
+                </div>
+            </div>
         </div>
 
     </div>
@@ -1475,6 +1825,80 @@ enum ScriptwritingLayout {
             btnToggle.textContent = sidebar.classList.contains('collapsed') ? '📂' : '📂';
         });
 
+        // ===== 选项卡切换：时间轴（编辑） / 剧本（只读预览） =====
+        const timelineArea = document.getElementById('timeline-area');
+        const scriptArea = document.getElementById('script-area');
+        const modeLabel = document.getElementById('mode-label');
+        const handle = document.getElementById('resize-handle');
+
+        function onModeChange(mode) {
+            console.log('[onModeChange] called with mode=' + mode);
+            const isTimeline = mode === 'timeline';
+            console.log('[onModeChange] isTimeline=' + isTimeline + ', timelineArea=' + !!timelineArea + ', scriptArea=' + !!scriptArea + ', sidebar=' + !!sidebar);
+
+            // 更新模式标签
+            if (modeLabel) {
+                modeLabel.textContent = isTimeline ? '📋 时间轴（编辑）' : '📄 剧本（只读预览）';
+            }
+
+            // 切换内容区
+            timelineArea.style.display = isTimeline ? 'flex' : 'none';
+            scriptArea.style.display  = isTimeline ? 'none' : '';
+            console.log('[onModeChange] timelineArea.display=' + timelineArea.style.display + ', scriptArea.display=' + scriptArea.style.display);
+
+            // 时间轴模式：显示侧边栏；剧本模式：隐藏侧边栏（全宽阅读）
+            if (isTimeline) {
+                sidebar.classList.remove('collapsed');
+                btnToggle.textContent = '📂';
+                handle.style.display = '';
+            } else {
+                sidebar.classList.add('collapsed');
+                btnToggle.textContent = '📂';
+                handle.style.display = 'none';
+                // 切换到剧本模式时，刷新剧本预览
+                if (typeof window._renderScriptPreview === 'function') {
+                    window._renderScriptPreview();
+                }
+            }
+            console.log('[onModeChange] done');
+        }
+        window.onModeChange = onModeChange;
+
+        // 默认时间轴模式
+        onModeChange('timeline');
+
+        // _renderScriptPreview — 确保剧本预览有内容（加载文件时 script-wrapper 已由 Swift 端填充）
+        window._renderScriptPreview = function() {
+            var scriptWrapper = document.getElementById('script-wrapper');
+            if (!scriptWrapper) return;
+            // 如果尚未加载文件，保持占位提示
+            if (!scriptWrapper.innerHTML.trim() || scriptWrapper.innerText.trim() === '📄 剧本预览\n打开 .sws 文件后自动渲染') {
+                scriptWrapper.innerHTML = '<div style="padding:80px 20px;text-align:center;color:var(--muted);font-size:1.1em;"><p style="font-size:2em;margin-bottom:12px;">📄</p><p>打开 .sws 文件后自动渲染</p></div>';
+            }
+        };
+
+        // ===== 时间轴节点点击（跳转到对应场景卡片，占位） =====
+        document.querySelectorAll('.axis-dot').forEach(dot => {
+            dot.addEventListener('click', () => {
+                const scene = dot.dataset.scene;
+                const card = document.getElementById('timeline-scene-' + scene);
+                if (card) {
+                    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    card.style.borderColor = 'var(--accent)';
+                    setTimeout(() => { card.style.borderColor = ''; }, 800);
+                }
+            });
+        });
+
+        // ===== 加场按钮（占位） =====
+        document.querySelector('.add-scene-card')?.addEventListener('click', () => {
+            const btn = document.querySelector('.add-scene-card');
+            btn.style.borderColor = 'var(--accent)';
+            btn.style.color = 'var(--accent)';
+            setTimeout(() => { btn.style.borderColor = ''; btn.style.color = ''; }, 300);
+            console.log('[Timeline] 添加新场 — Phase 2 实现');
+        });
+
         // ===== 角色选中 =====
         document.getElementById('char-list').addEventListener('click', (e) => {
             const item = e.target.closest('.char-item');
@@ -1484,7 +1908,6 @@ enum ScriptwritingLayout {
         });
 
         // ===== 侧边栏拖拽调整宽度 =====
-        const handle = document.getElementById('resize-handle');
         let dragging = false;
         let startX, startW;
 
@@ -1512,14 +1935,6 @@ enum ScriptwritingLayout {
             handle.classList.remove('dragging');
             document.body.style.cursor = '';
             document.body.style.userSelect = '';
-        });
-
-        // ===== Editor 工具栏按钮（纯 UI，暂无功能） =====
-        document.querySelectorAll('#editor-area .editor-toolbar button').forEach(btn => {
-            btn.addEventListener('click', () => {
-                btn.style.color = 'var(--accent)';
-                setTimeout(() => { btn.style.color = ''; }, 200);
-            });
         });
 
         // ===== 剧情块点击（跳转到对应场次，占位） =====
@@ -1557,98 +1972,7 @@ enum ScriptwritingLayout {
             }
         });
 
-        // ===== 编辑器焦点管理 =====
-        const editorBody = document.getElementById('editor-body');
-        editorBody.addEventListener('focus', () => {
-            editorBody.style.outline = 'none';
-        });
 
-        // ===== 回车拦截：新行继承类型 =====
-        editorBody.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                const sel = window.getSelection();
-                if (!sel.rangeCount) return;
-                const range = sel.getRangeAt(0);
-                const node = range.startContainer;
-
-                // 找到最近的 contenteditable 行
-                let line = null;
-                if (node.nodeType === Node.TEXT_NODE) {
-                    line = node.parentElement?.closest('[contenteditable="true"]');
-                } else if (node.nodeType === Node.ELEMENT_NODE) {
-                    line = node.closest('[contenteditable="true"]');
-                }
-
-                if (!line) return;
-
-                e.preventDefault();
-
-                // 获取当前行的类型信息
-                const lineType = line.getAttribute('data-line-type') || '';
-                const swsType = line.getAttribute('data-sws-type') || '';
-                const character = line.getAttribute('data-character') || '';
-
-                // 获取当前行在 editor-body 中的位置
-                const parent = line.parentElement;
-
-                // 创建新行
-                const newLine = document.createElement('div');
-                newLine.contentEditable = 'true';
-                newLine.innerHTML = '<br>'; // 空行占位
-
-                // 判断新行的类型
-                let newLineType = lineType;
-                let newSwsType = swsType;
-                let newCharacter = character;
-
-                if (lineType === 'dialogue-name') {
-                    // 角色名行后回车 → 新行是台词（同一角色）
-                    newLineType = 'dialogue-text';
-                    newSwsType = 'dialogue';
-                    newLine.className = 'sws-dialogue-text';
-                } else if (lineType === 'dialogue-text') {
-                    // 台词行后回车 → 继续台词（同一角色）
-                    newLineType = 'dialogue-text';
-                    newSwsType = 'dialogue';
-                    newLine.className = 'sws-dialogue-text';
-                } else if (lineType === 'scene-heading') {
-                    // 场景头后回车 → 动作描述
-                    newLineType = 'action';
-                    newSwsType = 'action';
-                    newLine.className = 'sws-action';
-                } else {
-                    // 其他类型 → 继承
-                    newLineType = lineType;
-                    newSwsType = swsType;
-                    if (line.classList.contains('sws-action')) {
-                        newLine.className = 'sws-action';
-                    } else if (line.classList.contains('sws-unattributed')) {
-                        newLine.className = 'sws-unattributed';
-                    }
-                }
-
-                newLine.setAttribute('data-line-type', newLineType);
-                newLine.setAttribute('data-sws-type', newSwsType);
-                if (newCharacter) {
-                    newLine.setAttribute('data-character', newCharacter);
-                }
-
-                // 插入到当前行后面
-                if (parent) {
-                    parent.insertBefore(newLine, line.nextSibling);
-                } else {
-                    // 当前行是 editor-body 的直接子元素
-                    editorBody.insertBefore(newLine, line.nextSibling);
-                }
-
-                // 设置光标到新行
-                const newRange = document.createRange();
-                newRange.setStart(newLine, 0);
-                newRange.collapse(true);
-                sel.removeAllRanges();
-                sel.addRange(newRange);
-            }
-        });
     </script>
     </body>
     </html>
