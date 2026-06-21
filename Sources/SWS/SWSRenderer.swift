@@ -50,15 +50,17 @@ public enum SWSRenderer {
     ///   - style: 显示风格（预设或自定义）
     ///   - extraCSS: 额外的 CSS 规则（可选，用于主题覆盖）
     ///   - characterColors: 角色→颜色映射（可选，用于角色染色）
+    ///   - editable: 是否输出 contenteditable="true"（默认 true，编辑器用；false = 只读预览）
     /// - Returns: 完整 HTML 字符串
     public static func render(
         document: SWSDocument,
         style: DisplayStyle = .chineseStandard,
         extraCSS: String? = nil,
-        characterColors: [String: String]? = nil
+        characterColors: [String: String]? = nil,
+        editable: Bool = true
     ) -> String {
-        let body = renderBody(document: document, style: style, characterColors: characterColors)
-        let css = buildCSS(style: style, extraCSS: extraCSS, characterColors: characterColors)
+        let body = renderBody(document: document, style: style, characterColors: characterColors, editable: editable)
+        let css = buildCSS(style: style, extraCSS: extraCSS, characterColors: characterColors, editable: editable)
         return """
         <!DOCTYPE html>
         <html lang="zh-CN">
@@ -80,7 +82,8 @@ public enum SWSRenderer {
     public static func renderBody(
         document: SWSDocument,
         style: DisplayStyle = .chineseStandard,
-        characterColors: [String: String]? = nil
+        characterColors: [String: String]? = nil,
+        editable: Bool = true
     ) -> String {
         var html = ""
 
@@ -94,7 +97,7 @@ public enum SWSRenderer {
 
         // 场景
         for (sceneIndex, scene) in document.scenes.enumerated() {
-            html += renderScene(scene, index: sceneIndex, style: style, characterColors: characterColors)
+            html += renderScene(scene, index: sceneIndex, style: style, characterColors: characterColors, editable: editable)
         }
 
         return html
@@ -107,19 +110,20 @@ public enum SWSRenderer {
         _ scene: SWSScene,
         index: Int,
         style: DisplayStyle,
-        characterColors: [String: String]? = nil
+        characterColors: [String: String]? = nil,
+        editable: Bool = true
     ) -> String {
         var html = "<div class=\"sws-scene\" data-scene=\"\(index)\">"
 
         // 场景头
         if let heading = scene.heading {
-            let headingHTML = renderSceneHeading(heading, style: style)
+            let headingHTML = renderSceneHeading(heading, style: style, editable: editable)
             html += headingHTML
         }
 
         // 块
         for (blockIndex, block) in scene.blocks.enumerated() {
-            html += renderBlock(block, sceneIndex: index, blockIndex: blockIndex, style: style, characterColors: characterColors)
+            html += renderBlock(block, sceneIndex: index, blockIndex: blockIndex, style: style, characterColors: characterColors, editable: editable)
         }
 
         html += "</div>"
@@ -135,15 +139,17 @@ public enum SWSRenderer {
     /// 渲染场景头
     private static func renderSceneHeading(
         _ heading: SWSSceneHeading,
-        style: DisplayStyle
+        style: DisplayStyle,
+        editable: Bool = true
     ) -> String {
         let sh = style.sceneHeading
         let text = heading.swsText
         let align = sh.alignment
         let fontSize = sh.font.size
+        let ce = editable ? " contenteditable=\"true\"" : ""
 
         return """
-        <div contenteditable="true" class="sws-scene-heading" data-sws-type="scene-heading" data-line-type="scene-heading" style="text-align:\(align);font-size:\(fontSize)px;font-weight:\(sh.font.bold ? "bold" : "normal");margin-bottom:\(sh.marginBottom)px">
+        <div\(ce) class="sws-scene-heading" data-sws-type="scene-heading" data-line-type="scene-heading" style="text-align:\(align);font-size:\(fontSize)px;font-weight:\(sh.font.bold ? "bold" : "normal");margin-bottom:\(sh.marginBottom)px">
         \(escapeHTML(text))
         </div>
         """
@@ -157,15 +163,16 @@ public enum SWSRenderer {
         sceneIndex: Int,
         blockIndex: Int,
         style: DisplayStyle,
-        characterColors: [String: String]? = nil
+        characterColors: [String: String]? = nil,
+        editable: Bool = true
     ) -> String {
         switch block {
         case .dialogue(let d):
-            return renderDialogue(d, sceneIndex: sceneIndex, blockIndex: blockIndex, style: style, characterColors: characterColors)
+            return renderDialogue(d, sceneIndex: sceneIndex, blockIndex: blockIndex, style: style, characterColors: characterColors, editable: editable)
         case .action(let a):
-            return renderAction(a, sceneIndex: sceneIndex, blockIndex: blockIndex, style: style)
+            return renderAction(a, sceneIndex: sceneIndex, blockIndex: blockIndex, style: style, editable: editable)
         case .unattributed(let u):
-            return renderUnattributed(u, sceneIndex: sceneIndex, blockIndex: blockIndex, style: style)
+            return renderUnattributed(u, sceneIndex: sceneIndex, blockIndex: blockIndex, style: style, editable: editable)
         case .emptyLine:
             return renderEmptyLine(style: style)
         }
@@ -179,7 +186,8 @@ public enum SWSRenderer {
         sceneIndex: Int,
         blockIndex: Int,
         style: DisplayStyle,
-        characterColors: [String: String]? = nil
+        characterColors: [String: String]? = nil,
+        editable: Bool = true
     ) -> String {
         let ds = style.dialogue
         let bracketType = ds.modifierBracketType
@@ -189,13 +197,9 @@ public enum SWSRenderer {
         } else {
             modifierHTML = ""
         }
+        let ce = editable ? " contenteditable=\"true\"" : ""
 
-        let linesHTML = d.lines.map { line -> String in
-            if line.isEmpty {
-                return "<br>"
-            }
-            return escapeHTML(line)
-        }.joined(separator: "\n")
+        let lineHTML = escapeHTML(d.line)
 
         // 角色名显示文本（带可选的方括号包裹）
         let displayName: String = {
@@ -210,15 +214,13 @@ public enum SWSRenderer {
         let charColor = characterColors?[d.character] ?? "#5bc0de"
         let charBgColor = charColor + "18" // 18 = ~10% 透明度
 
-        let ce = "contenteditable=\"true\""
-
         switch ds.layout {
         case .nameAboveText:
             // 角色名居中，台词换行缩进
             return """
             <div class="sws-dialogue" data-sws-type="dialogue" data-character="\(escapeHTML(d.character))" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px;border-left:2px solid \(charColor);padding-left:8px;background:\(charBgColor)">
             <div \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="text-align:\(ds.nameAlignment);font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(displayName)\(modifierHTML)</div>
-            <div \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="padding-left:\(ds.textIndentChars)em;font-size:\(ds.textFont.size)px;color:\(charColor)">\(linesHTML)</div>
+            <div \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="padding-left:\(ds.textIndentChars)em;font-size:\(ds.textFont.size)px;color:\(charColor)">\(lineHTML)</div>
             </div>
             """
 
@@ -227,7 +229,7 @@ public enum SWSRenderer {
             return """
             <div class="sws-dialogue" data-sws-type="dialogue" data-character="\(escapeHTML(d.character))" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px;border-left:2px solid \(charColor);padding-left:8px;background:\(charBgColor)">
             <span \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(displayName)\(modifierHTML)\(ds.separator)</span>
-            <span \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.textFont.size)px;color:\(charColor)">\(linesHTML)</span>
+            <span \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.textFont.size)px;color:\(charColor)">\(lineHTML)</span>
             </div>
             """
 
@@ -236,7 +238,7 @@ public enum SWSRenderer {
             return """
             <div class="sws-dialogue" data-sws-type="dialogue" data-character="\(escapeHTML(d.character))" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px;border-left:2px solid \(charColor);padding-left:8px;background:\(charBgColor)">
             <span \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(displayName)\(modifierHTML)\(ds.separator)</span>
-            <span \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.textFont.size)px;color:\(charColor)">\(linesHTML)</span>
+            <span \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.textFont.size)px;color:\(charColor)">\(lineHTML)</span>
             </div>
             """
 
@@ -245,7 +247,7 @@ public enum SWSRenderer {
             return """
             <div class="sws-dialogue" data-sws-type="dialogue" data-character="\(escapeHTML(d.character))" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px;border-left:2px solid \(charColor);padding-left:8px;background:\(charBgColor)">
             <div \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="text-align:\(ds.nameAlignment);font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(displayName)\(modifierHTML)</div>
-            <div \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="padding-left:\(ds.textIndentChars)em;font-size:\(ds.textFont.size)px;color:\(charColor)">\(linesHTML)</div>
+            <div \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="padding-left:\(ds.textIndentChars)em;font-size:\(ds.textFont.size)px;color:\(charColor)">\(lineHTML)</div>
             </div>
             """
         }
@@ -276,11 +278,13 @@ public enum SWSRenderer {
         _ a: SWSActionBlock,
         sceneIndex: Int,
         blockIndex: Int,
-        style: DisplayStyle
+        style: DisplayStyle,
+        editable: Bool = true
     ) -> String {
         let as_ = style.action
+        let ce = editable ? " contenteditable=\"true\"" : ""
         return """
-        <div contenteditable="true" class="sws-action" data-sws-type="action" data-line-type="action" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="font-size:\(as_.font.size)px;text-align:\(as_.alignment);text-indent:\(as_.firstLineIndentChars)em">
+        <div\(ce) class="sws-action" data-sws-type="action" data-line-type="action" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="font-size:\(as_.font.size)px;text-align:\(as_.alignment);text-indent:\(as_.firstLineIndentChars)em">
         \(escapeHTML(a.text))
         </div>
         """
@@ -293,19 +297,21 @@ public enum SWSRenderer {
         _ u: SWSUnattributedBlock,
         sceneIndex: Int,
         blockIndex: Int,
-        style: DisplayStyle
+        style: DisplayStyle,
+        editable: Bool = true
     ) -> String {
         let ds = style.dialogue
-        let linesHTML = u.lines.map { line -> String in
+        let lineHTML = u.lines.map { line -> String in
             if line.isEmpty {
                 return "<br>"
             }
             return escapeHTML(line)
         }.joined(separator: "\n")
+        let ce = editable ? " contenteditable=\"true\"" : ""
 
         return """
-        <div contenteditable="true" class="sws-unattributed" data-sws-type="unattributed" data-line-type="unattributed" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="font-size:\(ds.textFont.size)px;padding-left:\(ds.textIndentChars)em;color:#888;font-style:italic">
-        \(linesHTML)
+        <div\(ce) class="sws-unattributed" data-sws-type="unattributed" data-line-type="unattributed" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="font-size:\(ds.textFont.size)px;padding-left:\(ds.textIndentChars)em;color:#888;font-style:italic">
+        \(lineHTML)
         </div>
         """
     }
@@ -337,7 +343,7 @@ public enum SWSRenderer {
     // MARK: - CSS Builder
 
     /// 构建内嵌 CSS
-    private static func buildCSS(style: DisplayStyle, extraCSS: String? = nil, characterColors: [String: String]? = nil) -> String {
+    private static func buildCSS(style: DisplayStyle, extraCSS: String? = nil, characterColors: [String: String]? = nil, editable: Bool = true) -> String {
         var css = """
         * {
             margin: 0;
@@ -398,6 +404,16 @@ public enum SWSRenderer {
             height: 0;
         }
         """
+
+        // 预览模式：禁止选中文本
+        if !editable {
+            css += """
+        body {
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        """
+        }
 
         if let extra = extraCSS {
             css += "\n" + extra

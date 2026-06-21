@@ -444,7 +444,8 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
         var scenes: [SWSScene] = []
         var currentHeading: SWSSceneHeading?
         var currentBlocks: [SWSBlock] = []
-        var currentDialogue: SWSDialogueBlock?
+        /// 待绑定的角色名 + 修饰语（dialogue-name 行记录，dialogue-text 行消费）
+        var pendingCharacter: (name: String, modifier: String?)?
         var currentActionLines: [String] = []
 
         func flushAction() {
@@ -454,17 +455,9 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
             currentActionLines = []
         }
 
-        func flushDialogue() {
-            guard let d = currentDialogue else { return }
-            currentBlocks.append(.dialogue(d))
-            currentDialogue = nil
-        }
-
         func flushScene() {
-            flushDialogue()
             flushAction()
             if currentHeading != nil || !currentBlocks.isEmpty {
-                // 如果没有 blocks，加一个空行
                 if currentBlocks.isEmpty {
                     currentBlocks.append(.emptyLine)
                 }
@@ -473,7 +466,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
             }
             currentHeading = nil
             currentBlocks = []
-            currentDialogue = nil
+            pendingCharacter = nil
             currentActionLines = []
         }
 
@@ -483,8 +476,8 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
             let character = line["character"] ?? ""
 
             if text.isEmpty && lineType != "scene-heading" {
-                // 空行：结束当前 dialogue/action
-                flushDialogue()
+                // 空行：结束当前 action / clear pending character
+                pendingCharacter = nil
                 flushAction()
                 currentBlocks.append(.emptyLine)
                 continue
@@ -497,35 +490,32 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
 
             case "dialogue-name":
                 flushAction()
-                flushDialogue()
-                // 尝试提取角色名 + 修饰语
                 let (name, modifier) = extractCharacterAndModifier(from: text)
-                currentDialogue = SWSDialogueBlock(character: name, modifier: modifier, lines: [])
+                pendingCharacter = (name, modifier)
 
             case "dialogue-text":
                 flushAction()
-                if let d = currentDialogue {
-                    currentDialogue = SWSDialogueBlock(character: d.character, modifier: d.modifier, lines: d.lines + [text])
+                if let pc = pendingCharacter {
+                    currentBlocks.append(.dialogue(SWSDialogueBlock(character: pc.name, modifier: pc.modifier, line: text)))
                 } else if !character.isEmpty {
-                    // 有角色信息但没有 dialogue 上下文，创建新的
-                    currentDialogue = SWSDialogueBlock(character: character, modifier: nil, lines: [text])
+                    currentBlocks.append(.dialogue(SWSDialogueBlock(character: character, modifier: nil, line: text)))
                 } else {
                     // 没有上下文，作为 unattributed
                     currentBlocks.append(.unattributed(SWSUnattributedBlock(lines: [text])))
                 }
 
             case "action":
-                flushDialogue()
+                pendingCharacter = nil
                 currentActionLines.append(text)
 
             case "unattributed":
-                flushDialogue()
+                pendingCharacter = nil
                 flushAction()
                 currentBlocks.append(.unattributed(SWSUnattributedBlock(lines: [text])))
 
             default:
                 // 未知类型，尝试作为 action
-                flushDialogue()
+                pendingCharacter = nil
                 currentActionLines.append(text)
             }
         }

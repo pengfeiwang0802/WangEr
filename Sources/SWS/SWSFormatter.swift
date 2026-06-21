@@ -104,20 +104,14 @@ public enum DialogueFormat: String, CaseIterable {
         case .nameAbove:
             let header = d.modifier.map { "[\(d.character) | \($0)]" } ?? "[\(d.character)]"
             lines.append(header)
-            for line in d.lines { lines.append(line) }
+            lines.append(d.line)
 
         case .inline:
             let prefix = d.modifier.map { "[\(d.character) | \($0)]：" } ?? "[\(d.character)]："
-            if d.lines.isEmpty {
+            if d.line.isEmpty {
                 lines.append(prefix)
             } else {
-                for line in d.lines {
-                    if line.isEmpty {
-                        lines.append("")
-                    } else {
-                        lines.append("\(prefix)\(line)")
-                    }
-                }
+                lines.append("\(prefix)\(d.line)")
             }
         }
     }
@@ -210,7 +204,7 @@ private struct Parser {
             if let (ch, mod, text) = parseInlineDialogue(ln) {
                 flushDialogue(&dialogueBlock, into: &currentBlocks)
                 flushUnattributed(&unattributedLines, into: &currentBlocks)
-                currentBlocks.append(.dialogue(SWSDialogueBlock(character: ch, modifier: mod, lines: [text])))
+                currentBlocks.append(.dialogue(SWSDialogueBlock(character: ch, modifier: mod, line: text)))
                 continue
             }
 
@@ -310,11 +304,10 @@ private struct Parser {
         into blocks: inout [SWSBlock]
     ) {
         guard let b = db else { return }
-        // Trim trailing empty lines — they're block separators, not content
-        var lines = b.lines
-        while let last = lines.last, last.isEmpty { lines.removeLast() }
-        guard !lines.isEmpty else { db = nil; return }
-        blocks.append(.dialogue(SWSDialogueBlock(character: b.character, modifier: b.modifier, lines: lines)))
+        // 一行一个 SWSDialogueBlock，逐个产出
+        for line in b.lines where !line.isEmpty {
+            blocks.append(.dialogue(SWSDialogueBlock(character: b.character, modifier: b.modifier, line: line)))
+        }
         db = nil
     }
 

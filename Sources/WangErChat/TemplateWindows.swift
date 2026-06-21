@@ -282,15 +282,10 @@ class TemplateEditorWindow: NSObject {
     private var characterPopup: NSPopUpButton!
     private var modifierPopup: NSPopUpButton!
     private var headingPopup: NSPopUpButton!
-    private var actionPopup: NSPopUpButton!
-    private var endRulePopup: NSPopUpButton!
+
 
     private var onSave: ((FormatTemplate) -> Void)?
     private var editingTemplate: FormatTemplate?
-
-    private var currentPreviewStyle: DisplayStyle {
-        buildCurrentTemplate().toDisplayStyle()
-    }
 
     private override init() {}
 
@@ -375,24 +370,6 @@ class TemplateEditorWindow: NSObject {
         headingPopup = buildPopup(SceneHeadingFormatChoice.allCases.map { $0.displayName }, action: #selector(optionChanged))
         contentView.addSubview(headingPopup)
 
-        // 动作标记
-        let actLabel = NSTextField(labelWithString: "动作标记:")
-        actLabel.font = NSFont.systemFont(ofSize: 12)
-        actLabel.alignment = .right
-        actLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(actLabel)
-        actionPopup = buildPopup(ActionMarkerChoice.allCases.map { $0.displayName }, action: #selector(optionChanged))
-        contentView.addSubview(actionPopup)
-
-        // 台词结束
-        let endLabel = NSTextField(labelWithString: "台词结束:")
-        endLabel.font = NSFont.systemFont(ofSize: 12)
-        endLabel.alignment = .right
-        endLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(endLabel)
-        endRulePopup = buildPopup(DialogueEndRuleChoice.allCases.map { $0.displayName }, action: #selector(optionChanged))
-        contentView.addSubview(endRulePopup)
-
         // === 预览区域 ===
         let previewLabel = NSTextField(labelWithString: "实时预览")
         previewLabel.font = NSFont.boldSystemFont(ofSize: 12)
@@ -400,9 +377,8 @@ class TemplateEditorWindow: NSObject {
         previewLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(previewLabel)
 
-        // WKWebView 预览
-        let wkConfig = WKWebViewConfiguration()
-        previewWebView = WKWebView(frame: .zero, configuration: wkConfig)
+        // WKWebView 预览（只读——SWSRenderer 传 editable:false 不输出 contenteditable）
+        previewWebView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
         previewWebView.translatesAutoresizingMaskIntoConstraints = false
         previewWebView.setValue(false, forKey: "drawsBackground")
         let previewContainer = NSView(frame: .zero)
@@ -475,26 +451,8 @@ class TemplateEditorWindow: NSObject {
             headingPopup.leadingAnchor.constraint(equalTo: headLabel.trailingAnchor, constant: 8),
             headingPopup.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
 
-            // 动作
-            actLabel.topAnchor.constraint(equalTo: headingPopup.bottomAnchor, constant: 8),
-            actLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            actLabel.widthAnchor.constraint(equalToConstant: 80),
-
-            actionPopup.topAnchor.constraint(equalTo: actLabel.topAnchor, constant: -2),
-            actionPopup.leadingAnchor.constraint(equalTo: actLabel.trailingAnchor, constant: 8),
-            actionPopup.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-
-            // 台词结束
-            endLabel.topAnchor.constraint(equalTo: actionPopup.bottomAnchor, constant: 8),
-            endLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            endLabel.widthAnchor.constraint(equalToConstant: 80),
-
-            endRulePopup.topAnchor.constraint(equalTo: endLabel.topAnchor, constant: -2),
-            endRulePopup.leadingAnchor.constraint(equalTo: endLabel.trailingAnchor, constant: 8),
-            endRulePopup.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-
             // 预览标签
-            previewLabel.topAnchor.constraint(equalTo: endRulePopup.bottomAnchor, constant: 20),
+            previewLabel.topAnchor.constraint(equalTo: headingPopup.bottomAnchor, constant: 20),
             previewLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
 
             // 预览区域
@@ -535,8 +493,7 @@ class TemplateEditorWindow: NSObject {
         characterPopup?.selectItem(at: CharacterLayoutOption.allCases.firstIndex(of: t.characterLayout) ?? 0)
         modifierPopup?.selectItem(at: ModifierBracketChoice.allCases.firstIndex(of: t.modifierBracket) ?? 0)
         headingPopup?.selectItem(at: SceneHeadingFormatChoice.allCases.firstIndex(of: t.sceneHeadingFormat) ?? 0)
-        actionPopup?.selectItem(at: ActionMarkerChoice.allCases.firstIndex(of: t.actionMarker) ?? 0)
-        endRulePopup?.selectItem(at: DialogueEndRuleChoice.allCases.firstIndex(of: t.dialogueEndRule) ?? 0)
+
     }
 
     private func buildCurrentTemplate() -> FormatTemplate {
@@ -545,16 +502,18 @@ class TemplateEditorWindow: NSObject {
         t.characterLayout = CharacterLayoutOption.allCases[characterPopup?.indexOfSelectedItem ?? 0]
         t.modifierBracket = ModifierBracketChoice.allCases[modifierPopup?.indexOfSelectedItem ?? 0]
         t.sceneHeadingFormat = SceneHeadingFormatChoice.allCases[headingPopup?.indexOfSelectedItem ?? 0]
-        t.actionMarker = ActionMarkerChoice.allCases[actionPopup?.indexOfSelectedItem ?? 0]
-        t.dialogueEndRule = DialogueEndRuleChoice.allCases[endRulePopup?.indexOfSelectedItem ?? 0]
         return t
     }
 
     private func updatePreview() {
-        let style = currentPreviewStyle
+        let template = buildCurrentTemplate()
+        let style = template.toDisplayStyle()
+        // 样例文档的 block 已是完整的一对一绑定（每行一个 block），
+        // 无需额外变换——直接渲染。
         let html = SWSRenderer.render(
             document: FormatTemplate.sampleDocument,
-            style: style
+            style: style,
+            editable: false
         )
         previewWebView?.loadHTMLString(html, baseURL: nil)
     }
@@ -566,6 +525,8 @@ class TemplateEditorWindow: NSObject {
     @objc private func cancelAction(_ sender: Any?) {
         window?.close()
     }
+
+// MARK: - Actions
 
     @objc private func saveAction(_ sender: Any?) {
         let template = buildCurrentTemplate()

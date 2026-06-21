@@ -80,7 +80,7 @@ func cmdInfo(_ path: String) {
             for block in scene.blocks {
                 if case .dialogue(let d) = block, d.character == char {
                     count += 1
-                    totalChars += d.characterCount
+                    totalChars += d.line.count
                 }
             }
         }
@@ -116,7 +116,7 @@ func cmdValidate(_ path: String) {
                 if d.character.isEmpty {
                     issues.append("场景 \(i+1) 块 \(j+1): 空角色名")
                 }
-                if d.lines.isEmpty || d.lines.allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+                if d.line.trimmingCharacters(in: .whitespaces).isEmpty {
                     issues.append("场景 \(i+1) 块 \(j+1): 对白 [\(d.character)] 无内容")
                 }
             case .action(let a):

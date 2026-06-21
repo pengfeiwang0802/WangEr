@@ -209,39 +209,27 @@ public enum SWSBlock: Codable {
 
 // MARK: - Dialogue Block
 
-/// 对白块 —— 一个角色的一段台词
+/// 对白块 —— 角色 + 单行台词的一对一绑定
 ///
-/// 多段对白（4.3 节）合并为一个 block，lines 数组保留空行节奏。
-///
-/// ```sws
+/// ```
 /// [郑希远]
 /// 第一段话。
-///
-/// 第二段话。
 /// ```
-/// → `SWSDialogueBlock(character: "郑希远", lines: ["第一段话。", "", "第二段话。"])`
+/// → `SWSDialogueBlock(character: "郑希远", line: "第一段话。")`
+///
+/// 多段台词 = 多个 SWSDialogueBlock，不在一个 block 内打包。
 public struct SWSDialogueBlock: Codable {
     /// 角色名（如 "郑希远"）
     public let character: String
-    /// 修饰语（如 "笑道，拍桌子" / "VO"），nil 表示无修饰
+    /// 修饰语（如 "笑道" / "OV"），nil 表示无修饰
     public let modifier: String?
-    /// 台词行数组，空字符串表示段落间的空行
-    public let lines: [String]
+    /// 单行台词
+    public let line: String
 
-    public init(character: String, modifier: String? = nil, lines: [String] = []) {
+    public init(character: String, modifier: String? = nil, line: String = "") {
         self.character = character
         self.modifier = modifier
-        self.lines = lines
-    }
-
-    /// 去除空行后的纯台词文本
-    public var textLines: [String] {
-        lines.filter { !$0.isEmpty }
-    }
-
-    /// 台词总字数（不含空行和标点）
-    public var characterCount: Int {
-        textLines.reduce(0) { $0 + $1.count }
+        self.line = line
     }
 }
 
