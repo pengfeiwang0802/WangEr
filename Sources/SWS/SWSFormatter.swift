@@ -14,7 +14,7 @@ import Foundation
 /// 设计要点：
 /// - 序列化不丢信息：round-trip invariant = deserialize(serialize(doc)) == doc
 /// - 两种对白写出格式，读入时自动识别
-/// - 空行在对白块内保留为台词间的停顿（spec 4.3 节），不被拆成 .emptyLine
+/// - 空行在解析时结束当前对白块，块间不加额外空行
 public struct SWSFormatter {
     // MARK: - Types
 
@@ -91,7 +91,6 @@ public enum DialogueFormat: String, CaseIterable {
                 case .dialogue(let d):   writeDialogue(d, to: &lines)
                 case .action(let a):     lines.append(a.text)
                 case .unattributed(let u): writeUnattributed(u, to: &lines)
-                case .emptyLine:         lines.append("")
                 }
             }
         }
@@ -272,11 +271,10 @@ private struct Parser {
             }
 
             // ── Inside dialogue block ──
+            // 规则：空行总是结束当前对白块（同角色多段对白需重复写 [角色名] 头，normalizeBlocks 会自动合并）
             if var db = dialogueBlock {
                 if ln.isEmpty {
-                    // Empty line in dialogue = internal pause (spec 4.3)
-                    db.lines.append("")
-                    dialogueBlock = db
+                    flushDialogue(&dialogueBlock, into: &currentBlocks)
                 } else if isNewBlockStart(ln) {
                     // New dialogue/scene/action → end this block, re-process
                     flushDialogue(&dialogueBlock, into: &currentBlocks)
@@ -309,7 +307,7 @@ private struct Parser {
 
             // ── Plain line ──
             if ln.isEmpty {
-                currentBlocks.append(.emptyLine)
+                // 空行 → 跳过（块间视觉分隔，不做内容吸收）
             } else {
                 currentBlocks.append(.action(SWSActionBlock(text: ln)))
             }
@@ -318,10 +316,8 @@ private struct Parser {
         // ── Flush pending ──
         flushDialogue(&dialogueBlock, into: &currentBlocks)
         flushUnattributed(&unattributedLines, into: &currentBlocks)
-        // Strip trailing empty lines (artifact of serialize's trailing \n)
-        while let last = currentBlocks.last, case .emptyLine = last {
-            currentBlocks.removeLast()
-        }
+        // Normalize: merge consecutive same-type blocks, strip trailing \n\n
+        currentBlocks = Parser.normalizeBlocks(currentBlocks)
         if !currentBlocks.isEmpty || currentHeading != nil {
             scenes.append(SWSScene(heading: currentHeading, blocks: currentBlocks))
         }
@@ -352,9 +348,11 @@ private struct Parser {
         into blocks: inout [SWSBlock]
     ) {
         guard let b = db else { return }
-        // 一行一个 SWSDialogueBlock，逐个产出
-        for line in b.lines where !line.isEmpty {
-            blocks.append(.dialogue(SWSDialogueBlock(character: b.character, modifier: b.modifier, line: line)))
+        // 同一角色连续非空台词行合并为一个 block（\n 连接）
+        // 空行已终止对白块，不会出现在 lines 中
+        let text = b.lines.joined(separator: "\n")
+        if !text.isEmpty {
+            blocks.append(.dialogue(SWSDialogueBlock(character: b.character, modifier: b.modifier, line: text)))
         }
         db = nil
     }
@@ -622,6 +620,20 @@ private struct Parser {
         // 长度限制
         guard text.count >= 1 && text.count <= 8 else { return nil }
         return (text, nil)
+    }
+
+    // MARK: - Normalize
+
+    /// 后处理：删除空块（向后兼容 emptyLine 解码产物）
+    /// 
+    /// 不合并连续 block — 每个角色头产出一个独立对白块。
+    /// 多段同角色对白需在 .sws 中重复写角色头。
+    static func normalizeBlocks(_ blocks: [SWSBlock]) -> [SWSBlock] {
+        // 仅过滤空 action（向后兼容 emptyLine 解码）
+        return blocks.filter { block in
+            if case .action(let a) = block, a.text.isEmpty { return false }
+            return true
+        }
     }
 
     // MARK: - Warning

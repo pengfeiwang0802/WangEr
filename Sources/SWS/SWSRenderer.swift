@@ -174,8 +174,7 @@ public enum SWSRenderer {
             return renderAction(a, sceneIndex: sceneIndex, blockIndex: blockIndex, style: style, editable: editable)
         case .unattributed(let u):
             return renderUnattributed(u, sceneIndex: sceneIndex, blockIndex: blockIndex, style: style, editable: editable)
-        case .emptyLine:
-            return renderEmptyLine(style: style)
+        // .emptyLine 已废弃，block 文本中的 \n\n 替代空行
         }
     }
 

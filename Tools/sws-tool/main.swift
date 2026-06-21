@@ -5,6 +5,7 @@ import SWS
 
 enum Command: String, CaseIterable {
     case roundtrip   // 读 .sws → 序列化 → 反序列化 → 再序列化，比较前后
+    case serialize   // 读 .sws → 序列化输出
     case info        // 读 .sws → 输出统计信息
     case validate    // 读 .sws → 检查格式合法性
 }
@@ -16,6 +17,7 @@ func usage() -> Never {
     for cmd in Command.allCases {
         switch cmd {
         case .roundtrip: print("  roundtrip  读入 .sws 文件，做 round-trip 验证")
+        case .serialize: print("  serialize  读入 .sws 文件，输出序列化文本")
         case .info:      print("  info       读入 .sws 文件，输出统计")
         case .validate:  print("  validate   读入 .sws 文件，检查格式")
         }
@@ -26,6 +28,14 @@ func usage() -> Never {
 func readFile(_ path: String) -> String {
     let url = URL(fileURLWithPath: path)
     return try! String(contentsOf: url, encoding: .utf8)
+}
+
+func cmdSerialize(_ path: String) {
+    let text = readFile(path)
+    var fmt = SWSFormatter()
+    let doc = fmt.deserialize(text)
+    let output = fmt.serialize(doc)
+    print(output, terminator: "")
 }
 
 // ── Round-trip ──────────────────────────────────────────
@@ -72,6 +82,22 @@ func cmdInfo(_ path: String) {
     print("  场景数: \(doc.scenes.count)")
     print("  总块数: \(doc.totalBlockCount)")
     print("  角色: \(doc.allCharacters.count) 个")
+
+    // Debug: show blocks (emptyLine 已废弃，block 文本中 \n\n 替代)
+    print("")
+    print("  ═══ DEBUG: 场景块结构 ═══")
+    for (i, scene) in doc.scenes.enumerated() {
+        print("  场景\(i+1):")
+        for (j, block) in scene.blocks.enumerated() {
+            let desc: String
+            switch block {
+            case .dialogue(let d): desc = "DIALOGUE char=\(d.character) \"\(d.line.prefix(30))...\""
+            case .action(let a): desc = "ACTION \"\(a.text.prefix(40))...\""
+            case .unattributed(let u): desc = "UNATTRIBUTED lines=\(u.lines.count)"
+            }
+            print("    block[\(j)]=\(desc)")
+        }
+    }
 
     for char in doc.allCharacters {
         var count = 0
@@ -127,8 +153,7 @@ func cmdValidate(_ path: String) {
                 if u.lines.allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
                     issues.append("场景 \(i+1) 块 \(j+1): 空引文")
                 }
-            case .emptyLine:
-                break
+            // .emptyLine 已废弃
             }
         }
     }
@@ -156,6 +181,9 @@ switch command {
 case "roundtrip":
     guard let path else { print("❌ 需要文件路径"); exit(1) }
     cmdRoundtrip(path)
+case "serialize":
+    guard let path else { print("❌ 需要文件路径"); exit(1) }
+    cmdSerialize(path)
 case "info":
     guard let path else { print("❌ 需要文件路径"); exit(1) }
     cmdInfo(path)

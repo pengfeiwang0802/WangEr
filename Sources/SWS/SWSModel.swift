@@ -9,8 +9,7 @@ import Foundation
 /// SWSDocument → [SWSScene] → [SWSBlock]
 ///                                ├── .dialogue(SWSDialogueBlock)
 ///                                ├── .action(SWSActionBlock)
-///                                ├── .unattributed(SWSUnattributedBlock)
-///                                └── .emptyLine
+///                                └── .unattributed(SWSUnattributedBlock)
 /// ```
 ///
 /// 所有类型为 `struct` + `let`，编辑操作返回新实例，天然适配 undo/redo。
@@ -172,6 +171,11 @@ public struct SWSSceneHeading: Codable {
 // MARK: - Block Types
 
 /// 剧本块 —— 一场戏内的一行或一组行
+///
+/// 设计说明：
+/// - `.emptyLine` 已废弃。空行作为段落分隔符吸收到相邻块的文本内容中（\n\n）。
+/// - `BlockType.emptyLine` 仅保留用于向后兼容解码，运行时不再产生此类型。
+/// - 多行文本（action/dialogue/unattributed）中 \n 为软换行，\n\n 为段落分隔。
 public enum SWSBlock: Codable {
     /// 对白（已绑定角色）
     case dialogue(SWSDialogueBlock)
@@ -179,8 +183,6 @@ public enum SWSBlock: Codable {
     case action(SWSActionBlock)
     /// 对白（未标注角色，`> "..."` 前缀）
     case unattributed(SWSUnattributedBlock)
-    /// 语义空行
-    case emptyLine
 
     // MARK: Codable
 
@@ -189,7 +191,9 @@ public enum SWSBlock: Codable {
     }
 
     public enum BlockType: String, Codable {
-        case dialogue, action, unattributed, emptyLine
+        case dialogue, action, unattributed
+        /// 已废弃：向后兼容解码用，运行时不再产出
+        case emptyLine
     }
 
     public init(from decoder: Decoder) throws {
@@ -203,7 +207,8 @@ public enum SWSBlock: Codable {
         case .unattributed:
             self = .unattributed(try container.decode(SWSUnattributedBlock.self, forKey: .value))
         case .emptyLine:
-            self = .emptyLine
+            // 向后兼容：解码时遇到 emptyLine → 转为空 action（normalize 步骤会处理）
+            self = .action(SWSActionBlock(text: ""))
         }
     }
 
@@ -219,8 +224,6 @@ public enum SWSBlock: Codable {
         case .unattributed(let u):
             try container.encode(BlockType.unattributed, forKey: .type)
             try container.encode(u, forKey: .value)
-        case .emptyLine:
-            try container.encode(BlockType.emptyLine, forKey: .type)
         }
     }
 }
@@ -277,7 +280,7 @@ public struct SWSActionBlock: Codable {
 /// ```
 public struct SWSUnattributedBlock: Codable {
     /// 台词行数组（与 SWSDialogueBlock 结构一致，但缺少角色绑定）
-    public let lines: [String]
+    public var lines: [String]
 
     public init(lines: [String] = []) {
         self.lines = lines

@@ -330,8 +330,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
                         "type": "unattributed",
                         "lines": u.lines
                     ])
-                case .emptyLine:
-                    blocksJSON.append(["type": "emptyLine"])
+                // .emptyLine 已废弃：block 文本中的 \n\n 替代空行
                 }
             }
             sceneDict["blocks"] = blocksJSON
@@ -652,9 +651,6 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         func flushScene() {
             flushAction()
             if currentHeading != nil || !currentBlocks.isEmpty {
-                if currentBlocks.isEmpty {
-                    currentBlocks.append(.emptyLine)
-                }
                 let scene = SWSScene(heading: currentHeading, blocks: currentBlocks)
                 scenes.append(scene)
             }
@@ -673,7 +669,6 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
                 // 空行：结束当前 action / clear pending character
                 pendingCharacter = nil
                 flushAction()
-                currentBlocks.append(.emptyLine)
                 continue
             }
 
@@ -2114,8 +2109,6 @@ enum ScriptwritingLayout {
                                 cardHTML += '</div>';
                                 blkIdx++;
                             });
-                        } else if (blk.type === 'emptyLine') {
-                            cardHTML += '<div style="height:6px;"></div>';
                         }
                     });
 
