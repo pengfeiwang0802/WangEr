@@ -133,6 +133,8 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
         // 先加载默认空布局
         webView.navigationDelegate = self
+        // 注册 JS → Swift 消息通道（编辑同步）
+        webView.configuration.userContentController.add(self, name: "edit")
         webView.loadHTMLString(ScriptwritingLayout.html, baseURL: nil)
 
         // 工具栏（文件操作按钮）
@@ -369,6 +371,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         do {
             try output.write(to: url, atomically: true, encoding: .utf8)
             print("ScriptwritingPlugin: 已保存到 \(url.lastPathComponent)")
+            setDirtyFlag(false)
         } catch {
             print("ScriptwritingPlugin: 保存失败 \(error)")
         }
@@ -1529,6 +1532,102 @@ enum ScriptwritingLayout {
                 color: var(--text-primary);
             }
 
+            /* ========== Timeline 可编辑元素 ========== */
+            .scene-field {
+                border: 1px solid transparent;
+                background: transparent;
+                font-size: 0.78em;
+                font-weight: 600;
+                padding: 3px 8px;
+                border-radius: 5px;
+                font-family: inherit;
+                color: inherit;
+                outline: none;
+                min-width: 40px;
+                transition: all 0.15s;
+            }
+            .scene-field:hover { border-color: var(--border); background: var(--bg-primary); }
+            .scene-field:focus { border-color: var(--accent); background: var(--bg-primary); box-shadow: 0 0 0 2px var(--accent-soft); }
+            .scene-field.ie-field { color: #f5a623; min-width: 50px; }
+            .scene-field.loc-field { color: #a0a0b0; min-width: 80px; }
+            .scene-field.time-field { color: #6a9fc5; min-width: 50px; }
+
+            .tl-textarea {
+                flex: 1;
+                border: 1px solid transparent;
+                background: transparent;
+                font-size: 0.88em;
+                line-height: 1.5;
+                font-family: inherit;
+                color: inherit;
+                outline: none;
+                resize: none;
+                overflow: hidden;
+                border-radius: 4px;
+                padding: 2px 6px;
+                min-height: 1.4em;
+                transition: all 0.15s;
+                field-sizing: content;
+            }
+            .tl-textarea:hover { border-color: var(--border); background: var(--bg-primary); }
+            .tl-textarea:focus { border-color: var(--accent); background: var(--bg-primary); box-shadow: 0 0 0 2px var(--accent-soft); }
+            .tl-textarea.action-textarea { color: #5a8a5a; }
+            .tl-textarea.dialogue-textarea { color: var(--text-primary); }
+
+            .char-chip {
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+                padding: 2px 8px;
+                border-radius: 5px;
+                font-weight: 600;
+                font-size: 0.88em;
+                cursor: pointer;
+                user-select: none;
+                transition: all 0.15s;
+                border: 1px solid transparent;
+            }
+            .char-chip:hover { filter: brightness(0.9); }
+
+            /* 场景分隔条 */
+            .scene-separator {
+                height: 24px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                border-top: 1px dashed transparent;
+                border-bottom: 1px dashed transparent;
+                transition: all 0.2s;
+                position: relative;
+            }
+            .scene-separator:hover {
+                border-top-color: var(--border);
+                border-bottom-color: var(--border);
+            }
+            .add-scene-btn {
+                display: none;
+                width: 28px; height: 28px;
+                border-radius: 50%;
+                border: 1.5px dashed var(--border);
+                background: var(--bg-secondary);
+                color: var(--text-muted);
+                font-size: 1.1em;
+                cursor: pointer;
+                align-items: center;
+                justify-content: center;
+                transition: all 0.2s;
+                z-index: 2;
+            }
+            .scene-separator:hover .add-scene-btn {
+                display: flex;
+            }
+            .add-scene-btn:hover {
+                border-color: var(--accent);
+                color: var(--accent);
+                background: var(--accent-soft);
+                transform: scale(1.15);
+            }
+
             /* 添加新场卡片 */
             .add-scene-card {
                 display: flex;
@@ -1983,23 +2082,37 @@ enum ScriptwritingLayout {
                     cardHTML += '<div class="scene-card-header">';
                     cardHTML += '<div class="scene-number"><span class="scene-num-circle">' + sc.number + '</span></div>';
                     cardHTML += '<div class="scene-meta-fields">';
-                    if (ie) cardHTML += '<span class="scene-tag ie-tag">' + ieEmoji + ' ' + ie + '</span>';
-                    if (loc) cardHTML += '<span class="scene-tag loc-tag">' + loc + '</span>';
-                    if (time) cardHTML += '<span class="scene-tag time-tag">' + timeEmoji + ' ' + time + '</span>';
+                    cardHTML += '<input class="scene-field ie-field" data-scene="' + sc.number + '" data-field="interiorExterior" value="' + escHTML(ie) + '" placeholder="内景/外景" />';
+                    cardHTML += '<input class="scene-field loc-field" data-scene="' + sc.number + '" data-field="location" value="' + escHTML(loc) + '" placeholder="地点" />';
+                    cardHTML += '<input class="scene-field time-field" data-scene="' + sc.number + '" data-field="time" value="' + escHTML(time) + '" placeholder="时间" />';
                     cardHTML += '</div></div>';
                     cardHTML += '<div class="scene-card-body">';
 
+                    var blkIdx = 0;
                     (sc.blocks || []).forEach(function(blk) {
                         if (blk.type === 'action') {
-                            cardHTML += '<div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">' + escHTML(blk.text || '') + '</span></div>';
+                            cardHTML += '<div class="tl-block tl-action"><span class="tl-block-icon">📝</span>';
+                            cardHTML += '<textarea class="tl-textarea action-textarea" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-type="action" rows="1">' + escHTML(blk.text || '') + '</textarea>';
+                            cardHTML += '</div>';
+                            blkIdx++;
                         } else if (blk.type === 'dialogue') {
-                            cardHTML += '<div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">' + escHTML(blk.character || '') + '</span>';
+                            var charColor = charColors[blk.character] || '#999';
+                            cardHTML += '<div class="tl-block tl-dialogue">';
+                            cardHTML += '<span class="tl-block-icon">👤</span>';
+                            cardHTML += '<span class="char-chip" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-character="' + escHTML(blk.character || '') + '" style="background:' + charColor + '18;color:' + charColor + ';">' + escHTML(blk.character || '') + '</span>';
                             if (blk.modifier) cardHTML += '<span class="tl-char-mod">（' + escHTML(blk.modifier) + '）</span>';
                             cardHTML += '</div>';
-                            cardHTML += '<div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">' + escHTML(blk.line || '') + '</span></div>';
+                            cardHTML += '<div class="tl-block tl-dialogue-text">';
+                            cardHTML += '<span class="tl-block-icon">💬</span>';
+                            cardHTML += '<textarea class="tl-textarea dialogue-textarea" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-type="dialogue" rows="1">' + escHTML(blk.line || '') + '</textarea>';
+                            cardHTML += '</div>';
+                            blkIdx++;
                         } else if (blk.type === 'unattributed') {
                             (blk.lines || []).forEach(function(l) {
-                                cardHTML += '<div class="tl-block tl-action" style="color:#888;font-style:italic;"><span class="tl-block-icon">💬</span><span class="tl-block-text">' + escHTML(l) + '</span></div>';
+                                cardHTML += '<div class="tl-block tl-action" style="color:#888;font-style:italic;"><span class="tl-block-icon">💬</span>';
+                                cardHTML += '<textarea class="tl-textarea action-textarea" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-type="unattributed" rows="1">' + escHTML(l) + '</textarea>';
+                                cardHTML += '</div>';
+                                blkIdx++;
                             });
                         } else if (blk.type === 'emptyLine') {
                             cardHTML += '<div style="height:6px;"></div>';
@@ -2007,21 +2120,23 @@ enum ScriptwritingLayout {
                     });
 
                     cardHTML += '</div></div>';
+
+                    // scene separator (except after last scene's add-scene-card)
+                    cardHTML += '<div class="scene-separator" data-after-scene="' + sc.number + '"><button class="add-scene-btn" title="添加新场景">+</button></div>';
                 });
 
-                // 保留「添加新场」按钮
-                cardHTML += '<div class="add-scene-card" title="添加新场"><span class="add-scene-icon">＋</span><span class="add-scene-label">添加新场</span></div>';
+                // 底部大「添加新场」按钮（始终可见）
+                cardHTML += '<div class="add-scene-card" title="添加新场" id="add-scene-big"><span class="add-scene-icon">＋</span><span class="add-scene-label">添加新场</span></div>';
                 scroll.innerHTML = cardHTML;
 
-                // rebind add-scene
-                var addBtn = scroll.querySelector('.add-scene-card');
-                if (addBtn) {
-                    addBtn.addEventListener('click', function() {
-                        addBtn.style.borderColor = 'var(--accent)';
-                        addBtn.style.color = 'var(--accent)';
-                        setTimeout(function(){ addBtn.style.borderColor = ''; addBtn.style.color = ''; }, 300);
-                    });
-                }
+                // rebind all add-scene buttons (separators + big bottom button)
+                scroll.querySelectorAll('.add-scene-btn, .add-scene-card').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        this.style.borderColor = 'var(--accent)';
+                        this.style.color = 'var(--accent)';
+                        setTimeout(function(){ this.style.borderColor = ''; this.style.color = ''; }.bind(this), 300);
+                    }.bind(btn));
+                });
             }
 
             // ── 渲染底部时间轴节点 ──
@@ -2082,8 +2197,158 @@ enum ScriptwritingLayout {
             return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         }
 
+        // ===== 可编辑元素事件处理 =====
+        // Auto-grow textareas
+        document.addEventListener('input', function(e) {
+            var ta = e.target.closest('.tl-textarea');
+            if (!ta) return;
+            ta.style.height = 'auto';
+            ta.style.height = (ta.scrollHeight) + 'px';
+        });
+
+        // Focusout → push edit to Swift
+        document.addEventListener('focusout', function(e) {
+            var el = e.target;
+            var patch = null;
+            
+            if (el.classList.contains('scene-field')) {
+                var field = el.dataset.field;
+                var sceneNum = el.dataset.scene;
+                var value = el.value.trim();
+                patch = {
+                    action: 'updateHeading',
+                    scene: sceneNum,
+                    field: field,
+                    value: value
+                };
+            } else if (el.classList.contains('tl-textarea')) {
+                var sceneNum = el.dataset.scene;
+                var blockIdx = parseInt(el.dataset.block);
+                var type = el.dataset.type;
+                var value = el.value;
+                patch = {
+                    action: 'updateBlock',
+                    scene: sceneNum,
+                    blockIndex: blockIdx,
+                    type: type,
+                    value: value
+                };
+            }
+
+            if (patch && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.edit) {
+                try {
+                    window.webkit.messageHandlers.edit.postMessage(patch);
+                } catch(err) {
+                    console.log('[Timeline] postMessage fail:', err);
+                }
+            }
+        });
+
+        // Initialize auto-grow on all existing textareas
+        function initTextareaHeights() {
+            document.querySelectorAll('.tl-textarea').forEach(function(ta) {
+                ta.style.height = 'auto';
+                ta.style.height = (ta.scrollHeight) + 'px';
+            });
+        }
+        // Call after each render
+        var _origRenderTimeline = window.renderTimelineFromSWSBase64;
+        window.renderTimelineFromSWSBase64 = function(b64) {
+            _origRenderTimeline(b64);
+            setTimeout(initTextareaHeights, 50);
+        };
+
     </script>
     </body>
     </html>
     """
+}
+
+// MARK: - WKScriptMessageHandler (编辑同步)
+extension ScriptwritingPlugin: WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "edit",
+              let body = message.body as? [String: Any],
+              let action = body["action"] as? String else { return }
+
+        switch action {
+        case "updateHeading":
+            handleUpdateHeading(body)
+        case "updateBlock":
+            handleUpdateBlock(body)
+        default:
+            break
+        }
+
+        // 设置脏标记
+        setDirtyFlag(true)
+    }
+
+    private func handleUpdateHeading(_ body: [String: Any]) {
+        guard let sceneNum = body["scene"] as? String,
+              let field = body["field"] as? String,
+              let value = body["value"] as? String,
+              let doc = currentDocument else { return }
+
+        // Find the scene index
+        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
+        var scene = doc.scenes[sceneIdx]
+        guard var heading = scene.heading else { return }
+
+        switch field {
+        case "interiorExterior": heading = SWSSceneHeading(number: heading.number, interiorExterior: value.isEmpty ? nil : value, location: heading.location, time: heading.time, separator: heading.separator)
+        case "location": heading = SWSSceneHeading(number: heading.number, interiorExterior: heading.interiorExterior, location: value.isEmpty ? nil : value, time: heading.time, separator: heading.separator)
+        case "time": heading = SWSSceneHeading(number: heading.number, interiorExterior: heading.interiorExterior, location: heading.location, time: value.isEmpty ? nil : value, separator: heading.separator)
+        default: return
+        }
+
+        scene = SWSScene(heading: heading, blocks: scene.blocks)
+        var scenes = doc.scenes
+        scenes[sceneIdx] = scene
+        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
+    }
+
+    private func handleUpdateBlock(_ body: [String: Any]) {
+        guard let sceneNum = body["scene"] as? String,
+              let blockIdx = body["blockIndex"] as? Int,
+              let type = body["type"] as? String,
+              let value = body["value"] as? String,
+              let doc = currentDocument else { return }
+
+        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
+        var scene = doc.scenes[sceneIdx]
+        guard blockIdx < scene.blocks.count else { return }
+
+        var blocks = scene.blocks
+        let block = blocks[blockIdx]
+
+        switch (type, block) {
+        case ("action", .action):
+            blocks[blockIdx] = .action(SWSActionBlock(text: value))
+        case ("dialogue", .dialogue(let d)):
+            blocks[blockIdx] = .dialogue(SWSDialogueBlock(character: d.character, modifier: d.modifier, line: value))
+        case ("unattributed", .unattributed):
+            blocks[blockIdx] = .unattributed(SWSUnattributedBlock(lines: [value]))
+        default:
+            // Type mismatch — skip
+            return
+        }
+
+        scene = SWSScene(heading: scene.heading, blocks: blocks)
+        var scenes = doc.scenes
+        scenes[sceneIdx] = scene
+        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
+    }
+
+    private func setDirtyFlag(_ dirty: Bool) {
+        guard let window = findPluginWindow() else { return }
+        let title = window.title
+        let hasDot = title.hasSuffix(" \u{25CF}")
+
+        if dirty && !hasDot {
+            window.title = title + " \u{25CF}"
+        } else if !dirty && hasDot {
+            window.title = String(title.dropLast(2))
+        }
+    }
 }
