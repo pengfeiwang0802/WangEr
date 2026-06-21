@@ -6,6 +6,12 @@ let package = Package(
     platforms: [
         .macOS(.v14)
     ],
+    products: [
+        .library(
+            name: "SWS",
+            targets: ["SWS"]
+        )
+    ],
     dependencies: [],
     targets: [
         .target(

@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+import SWS
 
 // MARK: - Plugin 协议（草案阶段，最小接口）
 protocol WangErPlugin: AnyObject {
@@ -75,6 +76,13 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
     let name = "编剧助手"
     let pluginDescription = "AI 辅助剧本创作与一致性分析"
 
+    /// 当前加载的 .sws 文件路径
+    private var currentFileURL: URL?
+    /// 当前解析的文档（用于重新渲染）
+    private var currentDocument: SWSDocument?
+    /// 当前使用的显示样式
+    private var currentStyle: DisplayStyle = .chineseStandard
+
     func createWindow() -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1100, height: 750),
@@ -102,14 +110,207 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
             webView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
         ])
 
+        // 先加载默认空布局
         webView.loadHTMLString(ScriptwritingLayout.html, baseURL: nil)
+
+        // 添加工具栏按钮（通过 WKWebView 的 JS 通信，或直接加 NSButton 到 window）
+        setupToolbar(in: window, webView: webView)
 
         return window
     }
+
+    // MARK: - 工具栏
+
+    private func setupToolbar(in window: NSWindow, webView: WKWebView) {
+        let toolbar = NSToolbar(identifier: "ScriptwritingToolbar")
+        toolbar.delegate = self
+        toolbar.allowsUserCustomization = false
+        toolbar.displayMode = .iconOnly
+        window.toolbar = toolbar
+    }
+
+    // MARK: - 加载 .sws 文件
+
+    @objc func openSWSFile(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.title = "打开剧本文件"
+        panel.allowedContentTypes = [.init(filenameExtension: "sws") ?? .plainText]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        loadSWSFile(url: url)
+    }
+
+    func loadSWSFile(url: URL) {
+        do {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            var formatter = SWSFormatter()
+            let document = formatter.deserialize(text)
+            currentFileURL = url
+            currentDocument = document
+
+            // 更新窗口标题
+            if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "scriptwriting" }) ??
+                NSApp.windows.first(where: { $0.title.hasPrefix("✍️") }) {
+                window.title = "✍️ \(url.lastPathComponent)"
+            }
+
+            renderCurrentDocument()
+        } catch {
+            print("ScriptwritingPlugin: 加载文件失败 \(error)")
+        }
+    }
+
+    private func renderCurrentDocument() {
+        guard let document = currentDocument else { return }
+
+        // 找到该插件窗口的 WKWebView
+        guard let window = NSApp.windows.first(where: { $0.title.contains("编剧助手") || $0.title.hasSuffix(".sws") }),
+              let contentView = window.contentView,
+              let webView = contentView.subviews.first(where: { $0 is WKWebView }) as? WKWebView else {
+            return
+        }
+
+        let bodyHTML = SWSRenderer.renderBody(document: document, style: currentStyle)
+        // 通过 JS 只替换编辑器区域，保留 UI 布局
+        let escaped = bodyHTML
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "")
+        let js = "document.getElementById('editor-body').innerHTML = \"\(escaped)\";"
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    @objc func reloadFile(_ sender: Any?) {
+        guard let url = currentFileURL else { return }
+        loadSWSFile(url: url)
+    }
+
+    @objc func toggleDialogueLayout(_ sender: Any?) {
+        // 循环切换预设样式
+        let all = DisplayStyle.presets
+        let idx = all.firstIndex(where: { $0.name == currentStyle.name }) ?? 0
+        let next = all[(idx + 1) % all.count]
+        currentStyle = next
+        renderCurrentDocument()
+    }
+}
+
+// MARK: - NSToolbarDelegate
+
+extension ScriptwritingPlugin: NSToolbarDelegate {
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, .openFile, .reload, .toggleLayout, .flexibleSpace]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        switch itemIdentifier {
+        case .openFile:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "打开"
+            item.paletteLabel = "打开 .sws"
+            item.toolTip = "打开 .sws 剧本文件"
+            item.image = NSImage(systemSymbolName: "doc.badge.plus", accessibilityDescription: "打开")
+            item.target = self
+            item.action = #selector(openSWSFile(_:))
+            return item
+        case .reload:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "刷新"
+            item.paletteLabel = "重新加载"
+            item.toolTip = "重新加载当前文件"
+            item.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "刷新")
+            item.target = self
+            item.action = #selector(reloadFile(_:))
+            return item
+        case .toggleLayout:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "布局"
+            item.paletteLabel = "切换对白布局"
+            item.toolTip = "切换对白显示布局"
+            item.image = NSImage(systemSymbolName: "text.alignleft", accessibilityDescription: "布局")
+            item.target = self
+            item.action = #selector(toggleDialogueLayout(_:))
+            return item
+        default:
+            return nil
+        }
+    }
+}
+
+private extension NSToolbarItem.Identifier {
+    static let openFile = NSToolbarItem.Identifier("com.wanger.openSWS")
+    static let reload = NSToolbarItem.Identifier("com.wanger.reloadSWS")
+    static let toggleLayout = NSToolbarItem.Identifier("com.wanger.toggleLayout")
 }
 
 // MARK: - 编剧助手 UI 布局
 enum ScriptwritingLayout {
+    /// 额外 CSS，注入到 SWSRenderer 的 HTML 中
+    static let extraCSS = """
+        /* 编辑器区域覆盖 SWS 默认样式 */
+        #editor-area .editor-body {
+            padding: 32px 48px;
+            max-width: 720px;
+            margin: 0 auto;
+        }
+        #editor-area .editor-body .sws-scene-heading {
+            font-weight: 700;
+            font-size: 1.05em;
+            text-align: left;
+            margin: 20px 0 8px;
+            color: var(--gold);
+        }
+        #editor-area .editor-body .sws-action {
+            margin: 8px 0;
+            line-height: 1.7;
+        }
+        #editor-area .editor-body .sws-character {
+            text-align: center;
+            font-weight: 700;
+            margin: 16px 0 0;
+        }
+        #editor-area .editor-body .sws-parenthetical {
+            text-align: left;
+            font-style: italic;
+            margin: 2px 0 0;
+            padding-left: 2.5em;
+            color: var(--text-secondary);
+            font-size: 0.9em;
+        }
+        #editor-area .editor-body .sws-dialogue {
+            margin: 2px 0 8px;
+            padding: 0 3em;
+            line-height: 1.5;
+        }
+        #editor-area .editor-body .sws-unattributed {
+            margin: 8px 0;
+            padding: 0 3em;
+            line-height: 1.5;
+            font-style: italic;
+            color: var(--text-muted);
+        }
+        #editor-area .editor-body .sws-quote {
+            margin: 8px 0;
+            padding: 8px 3em;
+            border-left: 3px solid var(--accent);
+            background: var(--accent-soft);
+            line-height: 1.5;
+        }
+        #editor-area .editor-body .sws-separator {
+            text-align: center;
+            margin: 20px 0;
+            color: var(--text-muted);
+            opacity: 0.4;
+        }
+    """
+
     static let html = """
     <!DOCTYPE html>
     <html lang="zh-CN">
