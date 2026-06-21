@@ -222,6 +222,14 @@ private struct Parser {
                 continue
             }
 
+            // Bare name-above header (no brackets): "王二" → character name
+            if let (ch, mod) = parseBareNameHeader(ln, lookahead: eof ? nil : line) {
+                flushDialogue(&dialogueBlock, into: &currentBlocks)
+                flushUnattributed(&unattributedLines, into: &currentBlocks)
+                dialogueBlock = (character: ch, modifier: mod, lines: [])
+                continue
+            }
+
             // ── Inside dialogue block ──
             if var db = dialogueBlock {
                 if ln.isEmpty {
@@ -340,22 +348,37 @@ private struct Parser {
 
     // MARK: - Scene heading
 
-    private mutating func parseSceneHeading(_ ln: String) -> SWSSceneHeading {
+    /// 公共静态方法：从文本解析场景头
+    /// 支持 "## 第 1 场 · 内景 · 公寓 · 白天" 格式
+    /// 也支持不带 ## 的格式
+    public static func parseSceneHeading(_ text: String) -> SWSSceneHeading {
+        let ln = text.hasPrefix("##") ? text : "## " + text
+        return _parseSceneHeadingImpl(ln)
+    }
+
+    /// 公共实例方法（从编辑器行重建时使用）
+    public func parseSceneHeadingLine(_ text: String) -> SWSSceneHeading {
+        let ln = text.hasPrefix("##") ? text : "## " + text
+        return Self._parseSceneHeadingImpl(ln)
+    }
+
+    /// 内部实现，供公共方法和实例方法共用
+    private static func _parseSceneHeadingImpl(_ ln: String) -> SWSSceneHeading {
         let content = String(ln.dropFirst(3))
         // Try known separators in priority order
         for sep in [" · ", " - ", "  ", " "] {
             let parts = content.components(separatedBy: sep)
             guard parts.count >= 2 else { continue }
-            let number = extractNumber(parts[0])
+            let number = _extractNumber(parts[0])
 
             if parts.count == 2 {
-                if let ie = detectIE(parts[1]) {
+                if let ie = _detectIE(parts[1]) {
                     return SWSSceneHeading(number: number, interiorExterior: ie, separator: sep)
                 }
                 return SWSSceneHeading(number: number, location: parts[1], separator: sep)
             }
             if parts.count == 3 {
-                if let ie = detectIE(parts[1]) {
+                if let ie = _detectIE(parts[1]) {
                     return SWSSceneHeading(number: number, interiorExterior: ie, location: parts[2], separator: sep)
                 }
                 return SWSSceneHeading(number: number, location: parts[1], time: parts[2], separator: sep)
@@ -363,7 +386,7 @@ private struct Parser {
             // 4 parts: number / IE / location / time
             return SWSSceneHeading(
                 number: number,
-                interiorExterior: detectIE(parts[1]),
+                interiorExterior: _detectIE(parts[1]),
                 location: parts.count > 2 ? parts[2] : nil,
                 time: parts.count > 3 ? parts[3] : nil,
                 separator: sep
@@ -371,11 +394,15 @@ private struct Parser {
         }
 
         // Fallback: bare heading
-        let number = extractNumber(content)
+        let number = _extractNumber(content)
         return SWSSceneHeading(number: number, separator: " · ")
     }
 
-    private func extractNumber(_ text: String) -> String {
+    private mutating func parseSceneHeading(_ ln: String) -> SWSSceneHeading {
+        return Self._parseSceneHeadingImpl(ln)
+    }
+
+    private static func _extractNumber(_ text: String) -> String {
         var s = text
         for t in ["第", "场", "章", "Scene", "scene", "Act", "act"] {
             s = s.replacingOccurrences(of: t, with: "")
@@ -383,7 +410,7 @@ private struct Parser {
         return s.trimmingCharacters(in: .whitespaces)
     }
 
-    private func detectIE(_ text: String) -> String? {
+    private static func _detectIE(_ text: String) -> String? {
         let t = text.trimmingCharacters(in: .whitespaces)
         if t.contains("内景") || t == "内" { return "内景" }
         if t.contains("外景") || t == "外" { return "外景" }
@@ -433,6 +460,95 @@ private struct Parser {
         let name = inside.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return nil }
         return (name, nil)
+    }
+
+    // MARK: - Bare name-above header (no brackets)
+
+    /// 识别裸角色名（无方括号）：独立一行、1-8 个字符、不含句末标点、下一行非空非场景头
+    /// 例如：
+    /// ```
+    /// 郑希远
+    /// 你来了。
+    /// ```
+    /// 支持修饰语：
+    /// ```
+    /// 郑希远（OV）
+    /// 你来了。
+    /// ```
+    private func parseBareNameHeader(_ ln: String, lookahead: String?) -> (character: String, modifier: String?)? {
+        // 必须是纯文本行，不是空行
+        let trimmed = ln.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+
+        // 排除已知格式
+        guard !trimmed.hasPrefix("##") else { return nil }
+        guard !trimmed.hasPrefix(">") else { return nil }
+        guard !trimmed.hasPrefix("[") else { return nil }
+        guard !trimmed.hasPrefix("《") else { return nil }
+
+        // 尝试提取角色名 + 可选修饰语（中文括号内）
+        // 模式："郑希远" 或 "郑希远（OV）" 或 "郑希远（笑道）"
+        let nameWithModifier = tryExtractNameWithModifier(trimmed)
+
+        // 如果提取成功，检查角色名长度
+        if let (name, modifier) = nameWithModifier {
+            guard name.count >= 1 && name.count <= 8 else { return nil }
+            guard !name.hasPrefix("(") else { return nil }
+
+            // 下一行必须存在且非空
+            guard let next = lookahead else { return nil }
+            let nextTrimmed = next.trimmingCharacters(in: .whitespaces)
+            guard !nextTrimmed.isEmpty else { return nil }
+
+            // 下一行不能是场景头、角色名格式
+            guard !nextTrimmed.hasPrefix("##") else { return nil }
+            guard !nextTrimmed.hasPrefix(">") else { return nil }
+            guard !nextTrimmed.hasPrefix("[") else { return nil }
+
+            // 下一行也不能是裸角色名（避免连续角色名行被误认）
+            if let nextResult = tryExtractNameWithModifier(nextTrimmed) {
+                let nextName = nextResult.0
+                if nextName.count >= 1 && nextName.count <= 8 {
+                    // 下一行也像角色名 → 不是对白
+                    return nil
+                }
+            }
+
+            return (name, modifier)
+        }
+
+        return nil
+    }
+
+    /// 尝试从一行文本中提取角色名 + 可选修饰语
+    /// 支持格式："郑希远"、"郑希远（OV）"、"郑希远（笑道）"
+    /// 返回 (name, modifier?) 或 nil
+    private func tryExtractNameWithModifier(_ text: String) -> (String, String?)? {
+        // 检查是否有中文括号
+        if let openParen = text.firstIndex(of: "（"),
+           let closeParen = text.lastIndex(of: "）"),
+           openParen < closeParen {
+            let name = text[..<openParen].trimmingCharacters(in: .whitespaces)
+            let modifier = text[text.index(after: openParen)..<closeParen].trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { return nil }
+            guard !modifier.isEmpty else { return nil }
+            // 角色名不能含标点
+            let namePunct: Set<Character> = ["。", "，", "：", "；", "！", "？", "、", "…", "—", ".", ",", ":", ";", "!", "?", "“", "”"]
+            for ch in name {
+                if namePunct.contains(ch) { return nil }
+            }
+            return (name, modifier)
+        }
+
+        // 无括号：检查是否含句末标点
+        let punct: Set<Character> = ["。", "，", "：", "；", "！", "？", "、", "…", "—", "·", ".", ",", ":", ";", "!", "?", "“", "”", "（", "）", "『", "』"]
+        for ch in text {
+            if punct.contains(ch) { return nil }
+        }
+
+        // 长度限制
+        guard text.count >= 1 && text.count <= 8 else { return nil }
+        return (text, nil)
     }
 
     // MARK: - Warning

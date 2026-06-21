@@ -159,6 +159,12 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
             }
 
             renderCurrentDocument()
+
+            // 加载后清除所有红色验证标记
+            if let window = findPluginWindow(),
+               let webView = findWebView(in: window) {
+                clearInvalidMarks(webView: webView)
+            }
         } catch {
             print("ScriptwritingPlugin: 加载文件失败 \(error)")
         }
@@ -174,7 +180,10 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
             return
         }
 
-        let bodyHTML = SWSRenderer.renderBody(document: document, style: currentStyle)
+        // 生成角色→颜色映射（全局一致，跨场景同角色同色）
+        let characterColors = SWSRenderer.buildCharacterColorMap(document: document)
+
+        let bodyHTML = SWSRenderer.renderBody(document: document, style: currentStyle, characterColors: characterColors)
         // 通过 JS 只替换编辑器区域，保留 UI 布局
         let escaped = bodyHTML
             .replacingOccurrences(of: "\\", with: "\\\\")
@@ -188,6 +197,374 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
     @objc func reloadFile(_ sender: Any?) {
         guard let url = currentFileURL else { return }
         loadSWSFile(url: url)
+    }
+
+    // MARK: - 保存 .sws 文件
+
+    /// 从编辑器提取文本并保存回 .sws 文件
+    @objc func saveSWSFile(_ sender: Any?) {
+        guard let url = currentFileURL else {
+            print("ScriptwritingPlugin: 没有打开的文件，无法保存")
+            return
+        }
+        guard let window = findPluginWindow(),
+              let webView = findWebView(in: window) else {
+            print("ScriptwritingPlugin: 找不到编辑器 WebView")
+            return
+        }
+
+        // 先验证，再保存
+        validateAndSave(webView: webView, url: url)
+    }
+
+    // MARK: - 编辑器验证
+
+    /// 验证所有行 + 保存
+    private func validateAndSave(webView: WKWebView, url: URL) {
+        let js = buildValidateJS()
+        webView.evaluateJavaScript(js) { [weak self] result, error in
+            guard let self = self else { return }
+            if let error = error {
+                print("ScriptwritingPlugin: 验证失败 \(error)")
+                // 降级：直接保存
+                self.extractAndSave(webView: webView, url: url)
+                return
+            }
+            guard let resultStr = result as? String else {
+                print("ScriptwritingPlugin: 验证结果为空，直接保存")
+                self.extractAndSave(webView: webView, url: url)
+                return
+            }
+
+            // 解析验证结果
+            // 格式: "OK" 或 "INVALID:行号1,行号2,..."
+            if resultStr.hasPrefix("INVALID:") {
+                let invalidLinesStr = String(resultStr.dropFirst(8))
+                let invalidLines = invalidLinesStr.split(separator: ",").compactMap { Int($0) }
+                print("ScriptwritingPlugin: 发现 \(invalidLines.count) 行格式异常")
+
+                // 弹确认框
+                let alert = NSAlert()
+                alert.messageText = "有 \(invalidLines.count) 行格式异常"
+                alert.informativeText = "异常行已被红色标记标出。\n\n保存后异常行将按普通文本处理，不会丢失内容。\n\n是否继续保存？"
+                alert.addButton(withTitle: "继续保存")
+                alert.addButton(withTitle: "取消")
+                alert.alertStyle = .warning
+
+                let response = alert.runModal()
+                if response == .alertFirstButtonReturn {
+                    self.extractAndSave(webView: webView, url: url)
+                }
+            } else {
+                print("ScriptwritingPlugin: 验证通过，全部格式正确")
+                self.extractAndSave(webView: webView, url: url)
+            }
+        }
+    }
+
+    /// 构建验证 JS：遍历编辑器每行，检查格式
+    private func buildValidateJS() -> String {
+        return """
+        (function() {
+            var body = document.getElementById('editor-body');
+            if (!body) return 'OK';
+            var invalidLines = [];
+            var children = body.children;
+            for (var i = 0; i < children.length; i++) {
+                var el = children[i];
+                var text = (el.innerText || el.textContent || '').trim();
+                if (text === '') continue; // 空行跳过
+
+                var type = el.getAttribute('data-sws-type') || '';
+                var valid = false;
+
+                if (type === 'dialogue') {
+                    // 对白行：检查是否包含角色名信息
+                    // dialogue 块内，角色名行和台词行都有 data-sws-type=dialogue
+                    // 角色名行有 class="sws-dialogue-name"
+                    var isNameLine = el.classList.contains('sws-dialogue-name');
+                    if (isNameLine) {
+                        // 角色名行：非空即可
+                        valid = text.length > 0;
+                    } else {
+                        // 台词行：非空即可
+                        valid = text.length > 0;
+                    }
+                } else if (type === 'action') {
+                    // 动作描述行：非空即可
+                    valid = text.length > 0;
+                } else if (type === 'unattributed') {
+                    // 未标注对白：非空即可
+                    valid = text.length > 0;
+                } else {
+                    // 没有 data-sws-type 的行（可能是硬编码示例内容）
+                    // 尝试根据 CSS 类名判断
+                    if (el.classList.contains('scene-heading')) {
+                        valid = text.startsWith('第') || text.startsWith('##') || text.length > 0;
+                    } else if (el.classList.contains('character')) {
+                        valid = text.length > 0 && text.length <= 10;
+                    } else if (el.classList.contains('dialogue')) {
+                        valid = text.length > 0;
+                    } else if (el.classList.contains('action')) {
+                        valid = text.length > 0;
+                    } else {
+                        // 未知类型行：宽松处理，标记为警告
+                        valid = true;
+                    }
+                }
+
+                if (!valid) {
+                    invalidLines.push(i);
+                    // 标红：加红色左边框
+                    el.style.borderLeft = '3px solid #e74c3c';
+                    el.style.paddingLeft = '8px';
+                    el.style.backgroundColor = 'rgba(231, 76, 60, 0.08)';
+                } else {
+                    // 清除旧的红色标记
+                    if (el.style.borderLeft && el.style.borderLeft.includes('e74c3c')) {
+                        el.style.borderLeft = '';
+                        el.style.paddingLeft = '';
+                        el.style.backgroundColor = '';
+                    }
+                }
+            }
+
+            // 清除所有行左侧的旧验证标记
+            // 先清除所有行的标记，再重新标记无效行
+            for (var i = 0; i < children.length; i++) {
+                var el = children[i];
+                var text = (el.innerText || el.textContent || '').trim();
+                if (text === '') continue;
+                // 如果不在 invalidLines 中，清除标记
+                if (invalidLines.indexOf(i) === -1) {
+                    el.style.borderLeft = '';
+                    el.style.paddingLeft = '';
+                    el.style.backgroundColor = '';
+                }
+            }
+
+            if (invalidLines.length === 0) return 'OK';
+            return 'INVALID:' + invalidLines.join(',');
+        })();
+        """
+    }
+
+    /// 清除所有红色验证标记
+    private func clearInvalidMarks(webView: WKWebView) {
+        let js = """
+        (function() {
+            var body = document.getElementById('editor-body');
+            if (!body) return;
+            var children = body.children;
+            for (var i = 0; i < children.length; i++) {
+                var el = children[i];
+                el.style.borderLeft = '';
+                el.style.paddingLeft = '';
+                el.style.backgroundColor = '';
+            }
+        })();
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    /// 从编辑器提取文本并保存
+    private func extractAndSave(webView: WKWebView, url: URL) {
+        let js = """
+        (function() {
+            var body = document.getElementById('editor-body');
+            if (!body) return JSON.stringify([]);
+            var lines = [];
+            // 遍历所有 contenteditable 行（包括 dialogue 容器内的子行）
+            var allEditable = body.querySelectorAll('[contenteditable="true"]');
+            for (var i = 0; i < allEditable.length; i++) {
+                var el = allEditable[i];
+                var text = el.innerText || el.textContent || '';
+                text = text.replace(/\\n/g, '').trim();
+                var lineType = el.getAttribute('data-line-type') || '';
+                var character = el.getAttribute('data-character') || '';
+                lines.push({
+                    text: text,
+                    lineType: lineType,
+                    character: character
+                });
+            }
+            return JSON.stringify(lines);
+        })();
+        """
+
+        webView.evaluateJavaScript(js) { [weak self] result, error in
+            guard let self = self else { return }
+            if let error = error {
+                print("ScriptwritingPlugin: 提取编辑器内容失败 \(error)")
+                return
+            }
+            guard let jsonStr = result as? String, !jsonStr.isEmpty,
+                  let data = jsonStr.data(using: .utf8),
+                  let lines = try? JSONSerialization.jsonObject(with: data) as? [[String: String]] else {
+                print("ScriptwritingPlugin: 编辑器内容解析失败")
+                return
+            }
+
+            // 根据 data-line-type 重建 SWSDocument
+            let document = self.buildDocumentFromLines(lines)
+            var formatter = SWSFormatter()
+            let output = formatter.serialize(document)
+
+            do {
+                try output.write(to: url, atomically: true, encoding: .utf8)
+                print("ScriptwritingPlugin: 已保存到 \(url.lastPathComponent)")
+                // 更新 currentDocument
+                self.currentDocument = document
+            } catch {
+                print("ScriptwritingPlugin: 保存失败 \(error)")
+            }
+        }
+    }
+
+    // MARK: - 从编辑器行重建 SWSDocument
+
+    /// 从文本解析场景头（简化版，不依赖 SWSFormatter 的私有方法）
+    private func parseSceneHeadingFromText(_ text: String) -> SWSSceneHeading {
+        let t = text.hasPrefix("##") ? String(text.dropFirst(3)) : text
+        let trimmed = t.trimmingCharacters(in: .whitespaces)
+        // 尝试提取数字
+        var s = trimmed
+        for prefix in ["第", "场", "章", "Scene", "scene", "Act", "act"] {
+            s = s.replacingOccurrences(of: prefix, with: "")
+        }
+        let number = s.trimmingCharacters(in: .whitespaces).components(separatedBy: " ").first ?? "1"
+        return SWSSceneHeading(number: number.isEmpty ? "1" : number, separator: " · ")
+    }
+
+    /// 从编辑器行数据重建 SWSDocument
+    /// 利用 data-line-type 信息，不需要重新解析文本
+    private func buildDocumentFromLines(_ lines: [[String: String]]) -> SWSDocument {
+        var scenes: [SWSScene] = []
+        var currentHeading: SWSSceneHeading?
+        var currentBlocks: [SWSBlock] = []
+        var currentDialogue: SWSDialogueBlock?
+        var currentActionLines: [String] = []
+
+        func flushAction() {
+            guard !currentActionLines.isEmpty else { return }
+            let text = currentActionLines.joined(separator: "\n")
+            currentBlocks.append(.action(SWSActionBlock(text: text)))
+            currentActionLines = []
+        }
+
+        func flushDialogue() {
+            guard let d = currentDialogue else { return }
+            currentBlocks.append(.dialogue(d))
+            currentDialogue = nil
+        }
+
+        func flushScene() {
+            flushDialogue()
+            flushAction()
+            if currentHeading != nil || !currentBlocks.isEmpty {
+                // 如果没有 blocks，加一个空行
+                if currentBlocks.isEmpty {
+                    currentBlocks.append(.emptyLine)
+                }
+                let scene = SWSScene(heading: currentHeading, blocks: currentBlocks)
+                scenes.append(scene)
+            }
+            currentHeading = nil
+            currentBlocks = []
+            currentDialogue = nil
+            currentActionLines = []
+        }
+
+        for line in lines {
+            let text = line["text"] ?? ""
+            let lineType = line["lineType"] ?? ""
+            let character = line["character"] ?? ""
+
+            if text.isEmpty && lineType != "scene-heading" {
+                // 空行：结束当前 dialogue/action
+                flushDialogue()
+                flushAction()
+                currentBlocks.append(.emptyLine)
+                continue
+            }
+
+            switch lineType {
+            case "scene-heading":
+                flushScene()
+                currentHeading = parseSceneHeadingFromText(text)
+
+            case "dialogue-name":
+                flushAction()
+                flushDialogue()
+                // 尝试提取角色名 + 修饰语
+                let (name, modifier) = extractCharacterAndModifier(from: text)
+                currentDialogue = SWSDialogueBlock(character: name, modifier: modifier, lines: [])
+
+            case "dialogue-text":
+                flushAction()
+                if let d = currentDialogue {
+                    currentDialogue = SWSDialogueBlock(character: d.character, modifier: d.modifier, lines: d.lines + [text])
+                } else if !character.isEmpty {
+                    // 有角色信息但没有 dialogue 上下文，创建新的
+                    currentDialogue = SWSDialogueBlock(character: character, modifier: nil, lines: [text])
+                } else {
+                    // 没有上下文，作为 unattributed
+                    currentBlocks.append(.unattributed(SWSUnattributedBlock(lines: [text])))
+                }
+
+            case "action":
+                flushDialogue()
+                currentActionLines.append(text)
+
+            case "unattributed":
+                flushDialogue()
+                flushAction()
+                currentBlocks.append(.unattributed(SWSUnattributedBlock(lines: [text])))
+
+            default:
+                // 未知类型，尝试作为 action
+                flushDialogue()
+                currentActionLines.append(text)
+            }
+        }
+
+        // 收尾
+        flushScene()
+
+        let metadata = currentDocument?.metadata ?? SWSMetadata()
+        return SWSDocument(metadata: metadata, scenes: scenes)
+    }
+
+    /// 从一行文本中提取角色名和修饰语
+    /// 支持格式："王二" → ("王二", nil)
+    ///           "王二（OV）" → ("王二", "OV")
+    ///           "王二（低头笑了一声）" → ("王二", "低头笑了一声")
+    private func extractCharacterAndModifier(from text: String) -> (String, String?) {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        // 检查中文括号
+        if let openIdx = trimmed.firstIndex(of: "（"),
+           let closeIdx = trimmed.lastIndex(of: "）"),
+           openIdx < closeIdx {
+            let name = trimmed[..<openIdx].trimmingCharacters(in: .whitespaces)
+            let modifier = trimmed[trimmed.index(after: openIdx)..<closeIdx].trimmingCharacters(in: .whitespaces)
+            if !name.isEmpty && !modifier.isEmpty {
+                return (name, modifier)
+            }
+        }
+        return (trimmed, nil)
+    }
+
+    // MARK: - 窗口/WebView 查找辅助
+
+    private func findPluginWindow() -> NSWindow? {
+        return NSApp.windows.first(where: {
+            $0.title.contains("编剧助手") || $0.title.hasSuffix(".sws")
+        })
+    }
+
+    private func findWebView(in window: NSWindow) -> WKWebView? {
+        guard let contentView = window.contentView else { return nil }
+        return contentView.subviews.first(where: { $0 is WKWebView }) as? WKWebView
     }
 
     @objc func showLayoutMenu(_ sender: NSToolbarItem) {
@@ -215,7 +592,28 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
             }
             menu.addItem(item)
         }
+        menu.addItem(NSMenuItem.separator())
+        let manageItem = NSMenuItem(title: "管理模板...", action: #selector(openTemplateManager(_:)), keyEquivalent: "")
+        manageItem.target = self
+        menu.addItem(manageItem)
         return menu
+    }
+
+    @objc private func openTemplateManager(_ sender: Any?) {
+        TemplateManagerWindow.shared.show()
+        // 恢复下拉菜单标题——"管理模板..."不是模板，不能占着标题
+        if let popUp = layoutToolbarItem?.view as? NSPopUpButton {
+            popUp.title = currentStyle.displayName
+            // 也需要恢复选中状态：找到当前样式的 menu item，打勾
+            if let menu = popUp.menu {
+                for item in menu.items {
+                    if let style = item.representedObject as? DisplayStyle,
+                       style.name == currentStyle.name {
+                        item.state = .on
+                    }
+                }
+            }
+        }
     }
 
     @objc private func selectLayout(_ sender: NSMenuItem) {
@@ -246,7 +644,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
 
 extension ScriptwritingPlugin: NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .openFile, .reload, .toggleLayout, .flexibleSpace]
+        [.flexibleSpace, .openFile, .reload, .saveFile, .toggleLayout, .flexibleSpace]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -273,6 +671,15 @@ extension ScriptwritingPlugin: NSToolbarDelegate {
             item.target = self
             item.action = #selector(reloadFile(_:))
             return item
+        case .saveFile:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "保存"
+            item.paletteLabel = "保存 .sws"
+            item.toolTip = "保存当前编辑内容到 .sws 文件"
+            item.image = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "保存")
+            item.target = self
+            item.action = #selector(saveSWSFile(_:))
+            return item
         case .toggleLayout:
             let popUp = NSPopUpButton(frame: .zero, pullsDown: false)
             popUp.menu = buildLayoutMenu()
@@ -298,6 +705,7 @@ private extension NSToolbarItem.Identifier {
     static let openFile = NSToolbarItem.Identifier("com.wanger.openSWS")
     static let reload = NSToolbarItem.Identifier("com.wanger.reloadSWS")
     static let toggleLayout = NSToolbarItem.Identifier("com.wanger.toggleLayout")
+    static let saveFile = NSToolbarItem.Identifier("com.wanger.saveSWS")
 }
 
 // MARK: - 编剧助手 UI 布局
@@ -883,6 +1291,59 @@ enum ScriptwritingLayout {
                 color: var(--text-muted);
             }
 
+            /* ========== 语义类型颜色标识 ==========
+               让编剧一眼看出系统如何解析每行内容
+            */
+            /* 场号 - 金色高亮 + 加粗 */
+            #editor-area .editor-body [data-sws-type="scene-heading"],
+            #editor-area .editor-body .sws-scene-heading {
+                background: rgba(245, 166, 35, 0.12);
+                border-left: 3px solid var(--gold);
+                padding-left: 12px;
+                font-weight: 700 !important;
+            }
+            /* 对白 - 角色名行用青色系 */
+            #editor-area .editor-body .sws-dialogue-name {
+                color: #5bc0de;
+                font-weight: 600;
+            }
+            /* 对白 - 台词文本用浅蓝色 */
+            #editor-area .editor-body .sws-dialogue-text {
+                color: #b0d4f1;
+            }
+            /* 对白块整体左边界指示 */
+            #editor-area .editor-body [data-sws-type="dialogue"] {
+                border-left: 2px solid rgba(91, 192, 222, 0.25);
+                padding-left: 8px;
+            }
+            /* 动作描述 - 灰绿色 */
+            #editor-area .editor-body [data-sws-type="action"],
+            #editor-area .editor-body .sws-action {
+                color: #8fbc8f;
+            }
+            /* 未标注对白 - 淡紫色 */
+            #editor-area .editor-body [data-sws-type="unattributed"],
+            #editor-area .editor-body .sws-unattributed {
+                color: #c9a0dc;
+                font-style: italic;
+            }
+            /* 硬编码示例内容的类名映射（兼容） */
+            #editor-area .editor-body .scene-heading {
+                background: rgba(245, 166, 35, 0.12);
+                border-left: 3px solid var(--gold);
+                padding-left: 12px;
+            }
+            #editor-area .editor-body .character {
+                color: #5bc0de;
+                font-weight: 600;
+            }
+            #editor-area .editor-body .dialogue {
+                color: #b0d4f1;
+            }
+            #editor-area .editor-body .action {
+                color: #8fbc8f;
+            }
+
             /* ========== 侧边栏折叠 ========== */
             #sidebar.collapsed {
                 width: 0;
@@ -1175,6 +1636,93 @@ enum ScriptwritingLayout {
         const editorBody = document.getElementById('editor-body');
         editorBody.addEventListener('focus', () => {
             editorBody.style.outline = 'none';
+        });
+
+        // ===== 回车拦截：新行继承类型 =====
+        editorBody.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                const sel = window.getSelection();
+                if (!sel.rangeCount) return;
+                const range = sel.getRangeAt(0);
+                const node = range.startContainer;
+
+                // 找到最近的 contenteditable 行
+                let line = null;
+                if (node.nodeType === Node.TEXT_NODE) {
+                    line = node.parentElement?.closest('[contenteditable="true"]');
+                } else if (node.nodeType === Node.ELEMENT_NODE) {
+                    line = node.closest('[contenteditable="true"]');
+                }
+
+                if (!line) return;
+
+                e.preventDefault();
+
+                // 获取当前行的类型信息
+                const lineType = line.getAttribute('data-line-type') || '';
+                const swsType = line.getAttribute('data-sws-type') || '';
+                const character = line.getAttribute('data-character') || '';
+
+                // 获取当前行在 editor-body 中的位置
+                const parent = line.parentElement;
+
+                // 创建新行
+                const newLine = document.createElement('div');
+                newLine.contentEditable = 'true';
+                newLine.innerHTML = '<br>'; // 空行占位
+
+                // 判断新行的类型
+                let newLineType = lineType;
+                let newSwsType = swsType;
+                let newCharacter = character;
+
+                if (lineType === 'dialogue-name') {
+                    // 角色名行后回车 → 新行是台词（同一角色）
+                    newLineType = 'dialogue-text';
+                    newSwsType = 'dialogue';
+                    newLine.className = 'sws-dialogue-text';
+                } else if (lineType === 'dialogue-text') {
+                    // 台词行后回车 → 继续台词（同一角色）
+                    newLineType = 'dialogue-text';
+                    newSwsType = 'dialogue';
+                    newLine.className = 'sws-dialogue-text';
+                } else if (lineType === 'scene-heading') {
+                    // 场景头后回车 → 动作描述
+                    newLineType = 'action';
+                    newSwsType = 'action';
+                    newLine.className = 'sws-action';
+                } else {
+                    // 其他类型 → 继承
+                    newLineType = lineType;
+                    newSwsType = swsType;
+                    if (line.classList.contains('sws-action')) {
+                        newLine.className = 'sws-action';
+                    } else if (line.classList.contains('sws-unattributed')) {
+                        newLine.className = 'sws-unattributed';
+                    }
+                }
+
+                newLine.setAttribute('data-line-type', newLineType);
+                newLine.setAttribute('data-sws-type', newSwsType);
+                if (newCharacter) {
+                    newLine.setAttribute('data-character', newCharacter);
+                }
+
+                // 插入到当前行后面
+                if (parent) {
+                    parent.insertBefore(newLine, line.nextSibling);
+                } else {
+                    // 当前行是 editor-body 的直接子元素
+                    editorBody.insertBefore(newLine, line.nextSibling);
+                }
+
+                // 设置光标到新行
+                const newRange = document.createRange();
+                newRange.setStart(newLine, 0);
+                newRange.collapse(true);
+                sel.removeAllRanges();
+                sel.addRange(newRange);
+            }
         });
     </script>
     </body>

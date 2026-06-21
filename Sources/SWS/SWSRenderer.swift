@@ -14,6 +14,34 @@ import Foundation
 /// ```
 public enum SWSRenderer {
 
+    // MARK: - 角色颜色
+
+    /// 12 种高对比度角色颜色（色盲友好）
+    public static let characterColorPalette: [String] = [
+        "#E74C3C", // 红
+        "#3498DB", // 蓝
+        "#2ECC71", // 绿
+        "#F39C12", // 橙
+        "#9B59B6", // 紫
+        "#1ABC9C", // 青
+        "#E67E22", // 橙红
+        "#2980B9", // 深蓝
+        "#27AE60", // 深绿
+        "#D35400", // 橙褐
+        "#8E44AD", // 深紫
+        "#16A085", // 深青
+    ]
+
+    /// 从文档中提取所有角色并分配颜色（全局一致，跨场景）
+    public static func buildCharacterColorMap(document: SWSDocument) -> [String: String] {
+        let characters = document.allCharacters
+        var map: [String: String] = [:]
+        for (i, name) in characters.enumerated() {
+            map[name] = characterColorPalette[i % characterColorPalette.count]
+        }
+        return map
+    }
+
     // MARK: - Public API
 
     /// 渲染完整 HTML 文档
@@ -21,14 +49,16 @@ public enum SWSRenderer {
     ///   - document: 待渲染的剧本
     ///   - style: 显示风格（预设或自定义）
     ///   - extraCSS: 额外的 CSS 规则（可选，用于主题覆盖）
+    ///   - characterColors: 角色→颜色映射（可选，用于角色染色）
     /// - Returns: 完整 HTML 字符串
     public static func render(
         document: SWSDocument,
         style: DisplayStyle = .chineseStandard,
-        extraCSS: String? = nil
+        extraCSS: String? = nil,
+        characterColors: [String: String]? = nil
     ) -> String {
-        let body = renderBody(document: document, style: style)
-        let css = buildCSS(style: style, extraCSS: extraCSS)
+        let body = renderBody(document: document, style: style, characterColors: characterColors)
+        let css = buildCSS(style: style, extraCSS: extraCSS, characterColors: characterColors)
         return """
         <!DOCTYPE html>
         <html lang="zh-CN">
@@ -49,7 +79,8 @@ public enum SWSRenderer {
     /// 仅渲染 `<body>` 内部内容（可用于增量更新）
     public static func renderBody(
         document: SWSDocument,
-        style: DisplayStyle = .chineseStandard
+        style: DisplayStyle = .chineseStandard,
+        characterColors: [String: String]? = nil
     ) -> String {
         var html = ""
 
@@ -63,7 +94,7 @@ public enum SWSRenderer {
 
         // 场景
         for (sceneIndex, scene) in document.scenes.enumerated() {
-            html += renderScene(scene, index: sceneIndex, style: style)
+            html += renderScene(scene, index: sceneIndex, style: style, characterColors: characterColors)
         }
 
         return html
@@ -75,7 +106,8 @@ public enum SWSRenderer {
     private static func renderScene(
         _ scene: SWSScene,
         index: Int,
-        style: DisplayStyle
+        style: DisplayStyle,
+        characterColors: [String: String]? = nil
     ) -> String {
         var html = "<div class=\"sws-scene\" data-scene=\"\(index)\">"
 
@@ -87,7 +119,7 @@ public enum SWSRenderer {
 
         // 块
         for (blockIndex, block) in scene.blocks.enumerated() {
-            html += renderBlock(block, sceneIndex: index, blockIndex: blockIndex, style: style)
+            html += renderBlock(block, sceneIndex: index, blockIndex: blockIndex, style: style, characterColors: characterColors)
         }
 
         html += "</div>"
@@ -111,7 +143,7 @@ public enum SWSRenderer {
         let fontSize = sh.font.size
 
         return """
-        <div class="sws-scene-heading" style="text-align:\(align);font-size:\(fontSize)px;font-weight:\(sh.font.bold ? "bold" : "normal");margin-bottom:\(sh.marginBottom)px">
+        <div contenteditable="true" class="sws-scene-heading" data-sws-type="scene-heading" data-line-type="scene-heading" style="text-align:\(align);font-size:\(fontSize)px;font-weight:\(sh.font.bold ? "bold" : "normal");margin-bottom:\(sh.marginBottom)px">
         \(escapeHTML(text))
         </div>
         """
@@ -124,11 +156,12 @@ public enum SWSRenderer {
         _ block: SWSBlock,
         sceneIndex: Int,
         blockIndex: Int,
-        style: DisplayStyle
+        style: DisplayStyle,
+        characterColors: [String: String]? = nil
     ) -> String {
         switch block {
         case .dialogue(let d):
-            return renderDialogue(d, sceneIndex: sceneIndex, blockIndex: blockIndex, style: style)
+            return renderDialogue(d, sceneIndex: sceneIndex, blockIndex: blockIndex, style: style, characterColors: characterColors)
         case .action(let a):
             return renderAction(a, sceneIndex: sceneIndex, blockIndex: blockIndex, style: style)
         case .unattributed(let u):
@@ -145,7 +178,8 @@ public enum SWSRenderer {
         _ d: SWSDialogueBlock,
         sceneIndex: Int,
         blockIndex: Int,
-        style: DisplayStyle
+        style: DisplayStyle,
+        characterColors: [String: String]? = nil
     ) -> String {
         let ds = style.dialogue
         let modifierHTML: String
@@ -162,40 +196,46 @@ public enum SWSRenderer {
             return escapeHTML(line)
         }.joined(separator: "\n")
 
+        // 角色颜色
+        let charColor = characterColors?[d.character] ?? "#5bc0de"
+        let charBgColor = charColor + "18" // 18 = ~10% 透明度
+
+        let ce = "contenteditable=\"true\""
+
         switch ds.layout {
         case .nameAboveText:
             // 角色名居中，台词换行缩进
             return """
-            <div class="sws-dialogue" data-sws-type="dialogue" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px">
-            <div class="sws-dialogue-name" style="text-align:\(ds.nameAlignment);font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal")">\(escapeHTML(d.character))\(modifierHTML)</div>
-            <div class="sws-dialogue-text" style="padding-left:\(ds.textIndentChars)em;font-size:\(ds.textFont.size)px">\(linesHTML)</div>
+            <div class="sws-dialogue" data-sws-type="dialogue" data-character="\(escapeHTML(d.character))" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px;border-left:2px solid \(charColor);padding-left:8px;background:\(charBgColor)">
+            <div \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="text-align:\(ds.nameAlignment);font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(escapeHTML(d.character))\(modifierHTML)</div>
+            <div \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="padding-left:\(ds.textIndentChars)em;font-size:\(ds.textFont.size)px;color:\(charColor)">\(linesHTML)</div>
             </div>
             """
 
         case .nameInlineColon:
             // 角色名：台词（同行）
             return """
-            <div class="sws-dialogue" data-sws-type="dialogue" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px">
-            <span class="sws-dialogue-name" style="font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal")">\(escapeHTML(d.character))\(modifierHTML)\(ds.separator)</span>
-            <span class="sws-dialogue-text" style="font-size:\(ds.textFont.size)px">\(linesHTML)</span>
+            <div class="sws-dialogue" data-sws-type="dialogue" data-character="\(escapeHTML(d.character))" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px;border-left:2px solid \(charColor);padding-left:8px;background:\(charBgColor)">
+            <span \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(escapeHTML(d.character))\(modifierHTML)\(ds.separator)</span>
+            <span \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.textFont.size)px;color:\(charColor)">\(linesHTML)</span>
             </div>
             """
 
         case .nameInlineDash:
             // 角色名——台词（同行）
             return """
-            <div class="sws-dialogue" data-sws-type="dialogue" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px">
-            <span class="sws-dialogue-name" style="font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal")">\(escapeHTML(d.character))\(modifierHTML)\(ds.separator)</span>
-            <span class="sws-dialogue-text" style="font-size:\(ds.textFont.size)px">\(linesHTML)</span>
+            <div class="sws-dialogue" data-sws-type="dialogue" data-character="\(escapeHTML(d.character))" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px;border-left:2px solid \(charColor);padding-left:8px;background:\(charBgColor)">
+            <span \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(escapeHTML(d.character))\(modifierHTML)\(ds.separator)</span>
+            <span \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.textFont.size)px;color:\(charColor)">\(linesHTML)</span>
             </div>
             """
 
         case .nameLeftTextIndent:
             // 角色名顶格，台词换行缩进
             return """
-            <div class="sws-dialogue" data-sws-type="dialogue" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px">
-            <div class="sws-dialogue-name" style="text-align:\(ds.nameAlignment);font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal")">\(escapeHTML(d.character))\(modifierHTML)</div>
-            <div class="sws-dialogue-text" style="padding-left:\(ds.textIndentChars)em;font-size:\(ds.textFont.size)px">\(linesHTML)</div>
+            <div class="sws-dialogue" data-sws-type="dialogue" data-character="\(escapeHTML(d.character))" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px;border-left:2px solid \(charColor);padding-left:8px;background:\(charBgColor)">
+            <div \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="text-align:\(ds.nameAlignment);font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(escapeHTML(d.character))\(modifierHTML)</div>
+            <div \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="padding-left:\(ds.textIndentChars)em;font-size:\(ds.textFont.size)px;color:\(charColor)">\(linesHTML)</div>
             </div>
             """
         }
@@ -228,7 +268,7 @@ public enum SWSRenderer {
     ) -> String {
         let as_ = style.action
         return """
-        <div class="sws-action" data-sws-type="action" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="font-size:\(as_.font.size)px;text-align:\(as_.alignment);text-indent:\(as_.firstLineIndentChars)em">
+        <div contenteditable="true" class="sws-action" data-sws-type="action" data-line-type="action" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="font-size:\(as_.font.size)px;text-align:\(as_.alignment);text-indent:\(as_.firstLineIndentChars)em">
         \(escapeHTML(a.text))
         </div>
         """
@@ -252,7 +292,7 @@ public enum SWSRenderer {
         }.joined(separator: "\n")
 
         return """
-        <div class="sws-unattributed" data-sws-type="unattributed" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="font-size:\(ds.textFont.size)px;padding-left:\(ds.textIndentChars)em;color:#888;font-style:italic">
+        <div contenteditable="true" class="sws-unattributed" data-sws-type="unattributed" data-line-type="unattributed" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="font-size:\(ds.textFont.size)px;padding-left:\(ds.textIndentChars)em;color:#888;font-style:italic">
         \(linesHTML)
         </div>
         """
@@ -285,7 +325,7 @@ public enum SWSRenderer {
     // MARK: - CSS Builder
 
     /// 构建内嵌 CSS
-    private static func buildCSS(style: DisplayStyle, extraCSS: String? = nil) -> String {
+    private static func buildCSS(style: DisplayStyle, extraCSS: String? = nil, characterColors: [String: String]? = nil) -> String {
         var css = """
         * {
             margin: 0;
