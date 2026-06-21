@@ -82,6 +82,8 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
     private var currentDocument: SWSDocument?
     /// 当前使用的显示样式
     private var currentStyle: DisplayStyle = .chineseStandard
+    /// 持有布局切换按钮引用，方便更新 label
+    private weak var layoutToolbarItem: NSToolbarItem?
 
     func createWindow() -> NSWindow {
         let window = NSWindow(
@@ -188,13 +190,55 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
         loadSWSFile(url: url)
     }
 
-    @objc func toggleDialogueLayout(_ sender: Any?) {
-        // 循环切换预设样式
+    @objc func showLayoutMenu(_ sender: NSToolbarItem) {
+        // fallback: 直接循环切换
+        fallbackToggleLayout()
+    }
+
+    @objc func popUpLayoutChanged(_ sender: NSPopUpButton) {
+        guard let selectedItem = sender.selectedItem,
+              let style = selectedItem.representedObject as? DisplayStyle else { return }
+        currentStyle = style
+        renderCurrentDocument()
+        layoutToolbarItem?.label = style.displayName
+    }
+
+    private func buildLayoutMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for style in DisplayStyle.presets {
+            let item = NSMenuItem(title: style.displayName, action: #selector(selectLayout(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = style
+            if style.name == currentStyle.name {
+                item.state = NSControl.StateValue.on
+            }
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    @objc private func selectLayout(_ sender: NSMenuItem) {
+        guard let style = sender.representedObject as? DisplayStyle else { return }
+        currentStyle = style
+        renderCurrentDocument()
+        layoutToolbarItem?.label = style.displayName
+        // 更新 popUp button 的标题
+        if let popUp = layoutToolbarItem?.view as? NSPopUpButton {
+            popUp.title = style.displayName
+        }
+    }
+
+    private func fallbackToggleLayout() {
         let all = DisplayStyle.presets
         let idx = all.firstIndex(where: { $0.name == currentStyle.name }) ?? 0
         let next = all[(idx + 1) % all.count]
         currentStyle = next
         renderCurrentDocument()
+        layoutToolbarItem?.label = next.displayName
+        if let popUp = layoutToolbarItem?.view as? NSPopUpButton {
+            popUp.title = next.displayName
+        }
     }
 }
 
@@ -230,13 +274,19 @@ extension ScriptwritingPlugin: NSToolbarDelegate {
             item.action = #selector(reloadFile(_:))
             return item
         case .toggleLayout:
+            let popUp = NSPopUpButton(frame: .zero, pullsDown: false)
+            popUp.menu = buildLayoutMenu()
+            popUp.title = currentStyle.displayName
+            popUp.bezelStyle = .texturedRounded
+            popUp.target = self
+            popUp.action = #selector(popUpLayoutChanged(_:))
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "布局"
+            item.label = currentStyle.displayName
             item.paletteLabel = "切换对白布局"
             item.toolTip = "切换对白显示布局"
             item.image = NSImage(systemSymbolName: "text.alignleft", accessibilityDescription: "布局")
-            item.target = self
-            item.action = #selector(toggleDialogueLayout(_:))
+            item.view = popUp
+            self.layoutToolbarItem = item
             return item
         default:
             return nil

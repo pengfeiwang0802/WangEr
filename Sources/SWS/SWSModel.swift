@@ -335,6 +335,11 @@ public struct DisplayStyle: Codable {
     public let name: String
     public let description: String
 
+    /// 人类可读的短名称（括号前部分）
+    public var displayName: String {
+        description.components(separatedBy: "（").first ?? description
+    }
+
     public let sceneHeading: SceneHeadingStyle
     public let dialogue: DialogueStyle
     public let action: ActionStyle
