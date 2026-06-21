@@ -8,10 +8,24 @@ let package = Package(
     ],
     dependencies: [],
     targets: [
+        .target(
+            name: "SWS",
+            path: "Sources/SWS"
+        ),
         .executableTarget(
             name: "WangErChat",
-            dependencies: [],
+            dependencies: ["SWS"],
             path: "Sources/WangErChat"
+        ),
+        .testTarget(
+            name: "WangErChatTests",
+            dependencies: ["SWS"],
+            path: "Tests/WangErChatTests"
+        ),
+        .executableTarget(
+            name: "sws-tool",
+            dependencies: ["SWS"],
+            path: "Tools/sws-tool"
         )
     ]
 )
