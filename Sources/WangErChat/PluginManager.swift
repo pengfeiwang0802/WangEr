@@ -84,6 +84,8 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
     private var currentStyle: DisplayStyle = .chineseStandard
     /// 持有布局切换按钮引用，方便更新 label
     private weak var layoutToolbarItem: NSToolbarItem?
+    /// 模板管理窗口关闭观察者
+    private var templateManagerCloseObserver: NSObjectProtocol?
 
     func createWindow() -> NSWindow {
         let window = NSWindow(
@@ -583,6 +585,8 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
     private func buildLayoutMenu() -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
+
+        // 预设模板
         for style in DisplayStyle.presets {
             let item = NSMenuItem(title: style.displayName, action: #selector(selectLayout(_:)), keyEquivalent: "")
             item.target = self
@@ -592,6 +596,22 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
             }
             menu.addItem(item)
         }
+
+        // 自定义模板（选中时打勾不显示星星）
+        let customTemplates = FormatTemplate.loadAll()
+        if !customTemplates.isEmpty {
+            menu.addItem(NSMenuItem.separator())
+            for template in customTemplates {
+                let isSelected = template.name == currentStyle.name
+                let title = isSelected ? template.name : "⭐️ \(template.name)"
+                let item = NSMenuItem(title: title, action: #selector(selectCustomTemplate(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = template
+                if isSelected { item.state = .on }
+                menu.addItem(item)
+            }
+        }
+
         menu.addItem(NSMenuItem.separator())
         let manageItem = NSMenuItem(title: "管理模板...", action: #selector(openTemplateManager(_:)), keyEquivalent: "")
         manageItem.target = self
@@ -600,18 +620,54 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
     }
 
     @objc private func openTemplateManager(_ sender: Any?) {
-        TemplateManagerWindow.shared.show()
-        // 恢复下拉菜单标题——"管理模板..."不是模板，不能占着标题
-        if let popUp = layoutToolbarItem?.view as? NSPopUpButton {
-            popUp.title = currentStyle.displayName
-            // 也需要恢复选中状态：找到当前样式的 menu item，打勾
-            if let menu = popUp.menu {
-                for item in menu.items {
-                    if let style = item.representedObject as? DisplayStyle,
-                       style.name == currentStyle.name {
-                        item.state = .on
-                    }
+        // 关闭时刷新菜单
+        if templateManagerCloseObserver == nil {
+            templateManagerCloseObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: nil, queue: .main
+            ) { [weak self] notification in
+                guard let self, let win = notification.object as? NSWindow,
+                      win.title == "📋 模板管理" else { return }
+                self.refreshLayoutMenu()
+                if let obs = self.templateManagerCloseObserver {
+                    NotificationCenter.default.removeObserver(obs)
+                    self.templateManagerCloseObserver = nil
                 }
+            }
+        }
+        TemplateManagerWindow.shared.onApplyTemplate = { [weak self] template in
+            let style = template.toDisplayStyle()
+            self?.currentStyle = style
+            self?.renderCurrentDocument()
+            self?.layoutToolbarItem?.label = style.displayName
+            self?.refreshLayoutMenu()
+        }
+        TemplateManagerWindow.shared.show()
+        refreshPopUpSelection()
+    }
+
+    private func refreshLayoutMenu() {
+        guard let popUp = layoutToolbarItem?.view as? NSPopUpButton else { return }
+        popUp.menu = buildLayoutMenu()
+        refreshPopUpSelection()
+    }
+
+    private func refreshPopUpSelection() {
+        guard let popUp = layoutToolbarItem?.view as? NSPopUpButton,
+              let menu = popUp.menu else { return }
+        popUp.title = currentStyle.displayName
+        for item in menu.items {
+            if let style = item.representedObject as? DisplayStyle,
+               style.name == currentStyle.name {
+                popUp.select(item)
+                item.state = .on
+            } else if item.representedObject is DisplayStyle {
+                item.state = .off
+            } else if let template = item.representedObject as? FormatTemplate,
+                      template.name == currentStyle.name {
+                popUp.select(item)
+                item.state = .on
+            } else if item.representedObject is FormatTemplate {
+                item.state = .off
             }
         }
     }
@@ -625,6 +681,15 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
         if let popUp = layoutToolbarItem?.view as? NSPopUpButton {
             popUp.title = style.displayName
         }
+    }
+
+    @objc private func selectCustomTemplate(_ sender: NSMenuItem) {
+        guard let template = sender.representedObject as? FormatTemplate else { return }
+        let style = template.toDisplayStyle()
+        currentStyle = style
+        renderCurrentDocument()
+        layoutToolbarItem?.label = style.displayName
+        refreshLayoutMenu()
     }
 
     private func fallbackToggleLayout() {

@@ -182,9 +182,10 @@ public enum SWSRenderer {
         characterColors: [String: String]? = nil
     ) -> String {
         let ds = style.dialogue
+        let bracketType = ds.modifierBracketType
         let modifierHTML: String
         if let modifier = d.modifier, !modifier.isEmpty {
-            modifierHTML = renderModifier(modifier, style: ds.modifierStyle)
+            modifierHTML = renderModifier(modifier, style: ds.modifierStyle, bracketType: bracketType)
         } else {
             modifierHTML = ""
         }
@@ -195,6 +196,15 @@ public enum SWSRenderer {
             }
             return escapeHTML(line)
         }.joined(separator: "\n")
+
+        // 角色名显示文本（带可选的方括号包裹）
+        let displayName: String = {
+            let raw = escapeHTML(d.character)
+            switch ds.nameBracket {
+            case .none:   return raw
+            case .square: return "【" + raw + "】"
+            }
+        }()
 
         // 角色颜色
         let charColor = characterColors?[d.character] ?? "#5bc0de"
@@ -207,7 +217,7 @@ public enum SWSRenderer {
             // 角色名居中，台词换行缩进
             return """
             <div class="sws-dialogue" data-sws-type="dialogue" data-character="\(escapeHTML(d.character))" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px;border-left:2px solid \(charColor);padding-left:8px;background:\(charBgColor)">
-            <div \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="text-align:\(ds.nameAlignment);font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(escapeHTML(d.character))\(modifierHTML)</div>
+            <div \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="text-align:\(ds.nameAlignment);font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(displayName)\(modifierHTML)</div>
             <div \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="padding-left:\(ds.textIndentChars)em;font-size:\(ds.textFont.size)px;color:\(charColor)">\(linesHTML)</div>
             </div>
             """
@@ -216,7 +226,7 @@ public enum SWSRenderer {
             // 角色名：台词（同行）
             return """
             <div class="sws-dialogue" data-sws-type="dialogue" data-character="\(escapeHTML(d.character))" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px;border-left:2px solid \(charColor);padding-left:8px;background:\(charBgColor)">
-            <span \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(escapeHTML(d.character))\(modifierHTML)\(ds.separator)</span>
+            <span \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(displayName)\(modifierHTML)\(ds.separator)</span>
             <span \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.textFont.size)px;color:\(charColor)">\(linesHTML)</span>
             </div>
             """
@@ -225,7 +235,7 @@ public enum SWSRenderer {
             // 角色名——台词（同行）
             return """
             <div class="sws-dialogue" data-sws-type="dialogue" data-character="\(escapeHTML(d.character))" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px;border-left:2px solid \(charColor);padding-left:8px;background:\(charBgColor)">
-            <span \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(escapeHTML(d.character))\(modifierHTML)\(ds.separator)</span>
+            <span \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(displayName)\(modifierHTML)\(ds.separator)</span>
             <span \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="font-size:\(ds.textFont.size)px;color:\(charColor)">\(linesHTML)</span>
             </div>
             """
@@ -234,7 +244,7 @@ public enum SWSRenderer {
             // 角色名顶格，台词换行缩进
             return """
             <div class="sws-dialogue" data-sws-type="dialogue" data-character="\(escapeHTML(d.character))" data-scene="\(sceneIndex)" data-block="\(blockIndex)" style="margin-bottom:\(ds.marginBetweenDialogues)px;border-left:2px solid \(charColor);padding-left:8px;background:\(charBgColor)">
-            <div \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="text-align:\(ds.nameAlignment);font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(escapeHTML(d.character))\(modifierHTML)</div>
+            <div \(ce) class="sws-dialogue-name" data-line-type="dialogue-name" data-character="\(escapeHTML(d.character))" style="text-align:\(ds.nameAlignment);font-size:\(ds.nameFont.size)px;font-weight:\(ds.nameFont.bold ? "bold" : "normal");color:\(charColor)">\(displayName)\(modifierHTML)</div>
             <div \(ce) class="sws-dialogue-text" data-line-type="dialogue-text" data-character="\(escapeHTML(d.character))" style="padding-left:\(ds.textIndentChars)em;font-size:\(ds.textFont.size)px;color:\(charColor)">\(linesHTML)</div>
             </div>
             """
@@ -244,16 +254,18 @@ public enum SWSRenderer {
     // MARK: - Modifier
 
     /// 渲染修饰语
-    private static func renderModifier(_ modifier: String, style: ModifierStyle) -> String {
+    private static func renderModifier(_ modifier: String, style: ModifierStyle, bracketType: ModifierBracketType = .chineseParens) -> String {
+        let left = bracketType.left
+        let right = bracketType.right
         switch style {
         case .parentheses:
-            return "（" + escapeHTML(modifier) + "）"
+            return left + escapeHTML(modifier) + right
         case .parenthesesSmall:
-            return "<small>（" + escapeHTML(modifier) + "）</small>"
+            return "<small>" + left + escapeHTML(modifier) + right + "</small>"
         case .superscript:
-            return "<sup>（" + escapeHTML(modifier) + "）</sup>"
+            return "<sup>" + left + escapeHTML(modifier) + right + "</sup>"
         case .inlineItalic:
-            return " <em>（" + escapeHTML(modifier) + "）</em>"
+            return " <em>" + left + escapeHTML(modifier) + right + "</em>"
         }
     }
 

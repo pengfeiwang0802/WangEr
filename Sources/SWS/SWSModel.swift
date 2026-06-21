@@ -319,6 +319,56 @@ public enum ModifierStyle: String, Codable, CaseIterable {
     }
 }
 
+/// 修饰语括号类型
+public enum ModifierBracketType: String, Codable, CaseIterable {
+    case chineseParens = "chinese_parens"
+    case englishParens = "english_parens"
+    case squareBrackets = "square_brackets"
+    case none = "none"
+
+    public var displayName: String {
+        switch self {
+        case .chineseParens:   return "中文括号（）"
+        case .englishParens:   return "英文括号()"
+        case .squareBrackets:  return "方括号【】"
+        case .none:            return "无括号"
+        }
+    }
+
+    /// 左括号字符
+    public var left: String {
+        switch self {
+        case .chineseParens:  return "（"
+        case .englishParens:  return "("
+        case .squareBrackets: return "【"
+        case .none:           return ""
+        }
+    }
+
+    /// 右括号字符
+    public var right: String {
+        switch self {
+        case .chineseParens:  return "）"
+        case .englishParens:  return ")"
+        case .squareBrackets: return "】"
+        case .none:           return ""
+        }
+    }
+}
+
+/// 角色名括号类型（用于 [角色名] 格式）
+public enum NameBracketType: String, Codable, CaseIterable {
+    case none = "none"
+    case square = "square"
+
+    public var displayName: String {
+        switch self {
+        case .none:   return "无括号"
+        case .square: return "方括号【】"
+        }
+    }
+}
+
 /// 场间分隔样式
 public enum SceneSeparatorStyle: String, Codable, CaseIterable {
     case blankLine  = "blank_line"
@@ -344,6 +394,15 @@ public struct DisplayStyle: Codable {
     public let dialogue: DialogueStyle
     public let action: ActionStyle
     public let sceneSeparator: SceneSeparatorConfig
+
+    public init(name: String, description: String, sceneHeading: SceneHeadingStyle, dialogue: DialogueStyle, action: ActionStyle, sceneSeparator: SceneSeparatorConfig) {
+        self.name = name
+        self.description = description
+        self.sceneHeading = sceneHeading
+        self.dialogue = dialogue
+        self.action = action
+        self.sceneSeparator = sceneSeparator
+    }
 
     /// 预设 Style
     public static let chineseStandard = DisplayStyle(
@@ -512,6 +571,14 @@ public struct SceneHeadingStyle: Codable {
     public let font: FontStyle
     public let alignment: String
     public let marginBottom: Int
+
+    public init(prefixTemplate: String = "第{number}场", fieldSeparator: String = " · ", font: FontStyle = FontStyle(), alignment: String = "center", marginBottom: Int = 24) {
+        self.prefixTemplate = prefixTemplate
+        self.fieldSeparator = fieldSeparator
+        self.font = font
+        self.alignment = alignment
+        self.marginBottom = marginBottom
+    }
 }
 
 public struct DialogueStyle: Codable {
@@ -519,21 +586,47 @@ public struct DialogueStyle: Codable {
     public let nameFont: FontStyle
     public let nameAlignment: String
     public let modifierStyle: ModifierStyle
+    public let modifierBracketType: ModifierBracketType
+    public let nameBracket: NameBracketType
     public let textIndentChars: Int
     public let textFont: FontStyle
     public let separator: String
     public let marginBetweenDialogues: Int
+
+    public init(layout: DialogueLayout = .nameAboveText, nameFont: FontStyle = FontStyle(), nameAlignment: String = "center", modifierStyle: ModifierStyle = .parenthesesSmall, modifierBracketType: ModifierBracketType = .chineseParens, nameBracket: NameBracketType = .none, textIndentChars: Int = 2, textFont: FontStyle = FontStyle(), separator: String = "——", marginBetweenDialogues: Int = 8) {
+        self.layout = layout
+        self.nameFont = nameFont
+        self.nameAlignment = nameAlignment
+        self.modifierStyle = modifierStyle
+        self.modifierBracketType = modifierBracketType
+        self.nameBracket = nameBracket
+        self.textIndentChars = textIndentChars
+        self.textFont = textFont
+        self.separator = separator
+        self.marginBetweenDialogues = marginBetweenDialogues
+    }
 }
 
 public struct ActionStyle: Codable {
     public let font: FontStyle
     public let firstLineIndentChars: Int
     public let alignment: String
+
+    public init(font: FontStyle = FontStyle(size: 13), firstLineIndentChars: Int = 2, alignment: String = "justify") {
+        self.font = font
+        self.firstLineIndentChars = firstLineIndentChars
+        self.alignment = alignment
+    }
 }
 
 public struct SceneSeparatorConfig: Codable {
     public let style: SceneSeparatorStyle
     public let count: Int
+
+    public init(style: SceneSeparatorStyle = .blankLine, count: Int = 2) {
+        self.style = style
+        self.count = count
+    }
 }
 
 // MARK: - Import Profile
