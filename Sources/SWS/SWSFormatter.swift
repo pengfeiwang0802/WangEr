@@ -174,6 +174,45 @@ private struct Parser {
         // ── Skip leading empty lines after front matter ──
         while !eof && line.isEmpty { advance() }
 
+        // ── Bare metadata fallback（无 YAML front matter 的文件）──
+        // 识别开头 1-2 行裸文本作为标题/作者：
+        //   暗流          → title="暗流"
+        //   王二          → author="王二"
+        //   深夜食堂      → title="深夜食堂"
+        //   王二          → author="王二"
+        if meta.title == nil && !eof {
+            var peekLines: [String] = []
+            var pi = idx
+            while pi < lines.count && peekLines.count < 3 {
+                let ln = lines[pi].trimmingCharacters(in: .whitespaces)
+                if !ln.isEmpty { peekLines.append(ln) }
+                pi += 1
+            }
+            func _looksLikeMetadata(_ s: String) -> Bool {
+                if s.hasPrefix("##") || s.hasPrefix("[") || s.hasPrefix(">") || s.hasPrefix("《") { return false }
+                if s.count > 40 { return false }
+                if s.contains("。") || s.contains("？") || s.contains("！") { return false }
+                return true
+            }
+            if let first = peekLines.first, _looksLikeMetadata(first) {
+                meta.title = first
+                // advance past title line (and any empty lines before it)
+                while !eof && line.trimmingCharacters(in: .whitespaces).isEmpty { advance() }
+                if !eof && line.trimmingCharacters(in: .whitespaces) == first { advance() }
+                // skip empty lines after title
+                while !eof && line.trimmingCharacters(in: .whitespaces).isEmpty { advance() }
+                // check for bare author on next line
+                if peekLines.count >= 2 {
+                    let second = peekLines[1]
+                    if _looksLikeMetadata(second) && second.count <= 20 {
+                        meta.author = second
+                        if !eof && line.trimmingCharacters(in: .whitespaces) == second { advance() }
+                        while !eof && line.trimmingCharacters(in: .whitespaces).isEmpty { advance() }
+                    }
+                }
+            }
+        }
+
         // ── Body ──
         while !eof {
             let ln = line
@@ -202,6 +241,14 @@ private struct Parser {
 
             // Inline dialogue: [name]：text  or [name | mod]：text
             if let (ch, mod, text) = parseInlineDialogue(ln) {
+                flushDialogue(&dialogueBlock, into: &currentBlocks)
+                flushUnattributed(&unattributedLines, into: &currentBlocks)
+                currentBlocks.append(.dialogue(SWSDialogueBlock(character: ch, modifier: mod, line: text)))
+                continue
+            }
+
+            // Bracket-inline: [name]text  or [name]（modifier）text
+            if let (ch, mod, text) = parseBracketInline(ln) {
                 flushDialogue(&dialogueBlock, into: &currentBlocks)
                 flushUnattributed(&unattributedLines, into: &currentBlocks)
                 currentBlocks.append(.dialogue(SWSDialogueBlock(character: ch, modifier: mod, line: text)))
@@ -296,6 +343,7 @@ private struct Parser {
     private func isNewBlockStart(_ ln: String) -> Bool {
         ln.hasPrefix("## ") || ln.hasPrefix("> ") || ln == ">"
             || parseInlineDialogue(ln) != nil
+            || parseBracketInline(ln) != nil
             || parseNameAboveHeader(ln) != nil
     }
 
@@ -435,6 +483,38 @@ private struct Parser {
         let name = inside.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return nil }
         return (name, nil, text)
+    }
+
+    // MARK: - Bracket-inline: [name]text or [name]（modifier）text
+
+    /// 解析紧凑方括号内联对白：`[老板]（在厨房里）来了啊老陈，还是老样子？`
+    /// 也支持无修饰语格式：`[老板]来了啊老陈。`
+    /// 区别于 `parseInlineDialogue`（要求 `]：` 冒号分隔）
+    private func parseBracketInline(_ ln: String) -> (character: String, modifier: String?, text: String)? {
+        guard ln.hasPrefix("[") else { return nil }
+        guard let close = ln.firstIndex(of: "]") else { return nil }
+        let inside = String(ln[ln.index(after: ln.startIndex)..<close])
+        var after = String(ln[ln.index(after: close)...]).trimmingCharacters(in: .whitespaces)
+
+        // Must NOT be followed by ： (that's parseInlineDialogue's job)
+        guard !after.hasPrefix("：") else { return nil }
+        // Must have content after bracket
+        guard !after.isEmpty else { return nil }
+
+        let name = inside.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return nil }
+
+        // Check for modifier in Chinese parens: （modifier）text
+        if after.hasPrefix("（"), let closeParen = after.firstIndex(of: "）") {
+            let mod = String(after[after.index(after: after.startIndex)..<closeParen])
+                .trimmingCharacters(in: .whitespaces)
+            let text = String(after[after.index(after: closeParen)...])
+                .trimmingCharacters(in: .whitespaces)
+            return (name, mod.isEmpty ? nil : mod, text)
+        }
+
+        // No modifier: [name]text
+        return (name, nil, after)
     }
 
     // MARK: - Name-above header: [name] or [name | mod]

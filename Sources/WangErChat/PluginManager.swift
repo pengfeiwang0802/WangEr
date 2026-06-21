@@ -350,27 +350,64 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         return json
     }
 
-    @objc func reloadFile(_ sender: Any?) {
-        guard let url = currentFileURL else { return }
-        loadSWSFile(url: url)
-    }
-
     // MARK: - 保存 .sws 文件
 
-    /// 从编辑器提取文本并保存回 .sws 文件
+    /// 将当前文档直接序列化保存为 .sws 文件
     @objc func saveSWSFile(_ sender: Any?) {
         guard let url = currentFileURL else {
             print("ScriptwritingPlugin: 没有打开的文件，无法保存")
             return
         }
-        guard let window = findPluginWindow(),
-              let webView = findWebView(in: window) else {
-            print("ScriptwritingPlugin: 找不到编辑器 WebView")
+        guard let document = currentDocument else {
+            print("ScriptwritingPlugin: 没有当前文档，无法保存")
             return
         }
 
-        // 先验证，再保存
-        validateAndSave(webView: webView, url: url)
+        let formatter = SWSFormatter()
+        let output = formatter.serialize(document)
+
+        do {
+            try output.write(to: url, atomically: true, encoding: .utf8)
+            print("ScriptwritingPlugin: 已保存到 \(url.lastPathComponent)")
+        } catch {
+            print("ScriptwritingPlugin: 保存失败 \(error)")
+        }
+    }
+
+    /// 另存为：弹目录选择框，可换文件名、换位置
+    @objc func saveAsSWSFile(_ sender: Any?) {
+        guard let document = currentDocument else {
+            print("ScriptwritingPlugin: 没有当前文档，无法另存为")
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.title = "另存为 .sws 剧本文件"
+        panel.canCreateDirectories = true
+        panel.allowedContentTypes = [.init(filenameExtension: "sws")!]
+
+        // 默认文件名：当前文件名 或 剧名.sws
+        if let currentName = currentFileURL?.deletingPathExtension().lastPathComponent {
+            panel.nameFieldStringValue = "\(currentName).sws"
+        } else if let title = document.metadata.title, !title.isEmpty {
+            panel.nameFieldStringValue = "\(title).sws"
+        } else {
+            panel.nameFieldStringValue = "未命名.sws"
+        }
+
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+
+            let formatter = SWSFormatter()
+            let output = formatter.serialize(document)
+
+            do {
+                try output.write(to: url, atomically: true, encoding: .utf8)
+                print("ScriptwritingPlugin: 已另存为 \(url.lastPathComponent)")
+            } catch {
+                print("ScriptwritingPlugin: 另存为失败 \(error)")
+            }
+        }
     }
 
     // MARK: - 编辑器验证
@@ -896,7 +933,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
 extension ScriptwritingPlugin: NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .openFile, .reload, .saveFile, .toggleLayout]
+        [.flexibleSpace, .openFile, .saveFile, .saveAsFile, .toggleLayout]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -914,15 +951,6 @@ extension ScriptwritingPlugin: NSToolbarDelegate {
             item.target = self
             item.action = #selector(openSWSFile(_:))
             return item
-        case .reload:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "刷新"
-            item.paletteLabel = "重新加载"
-            item.toolTip = "重新加载当前文件"
-            item.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "刷新")
-            item.target = self
-            item.action = #selector(reloadFile(_:))
-            return item
         case .saveFile:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "保存"
@@ -931,6 +959,15 @@ extension ScriptwritingPlugin: NSToolbarDelegate {
             item.image = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "保存")
             item.target = self
             item.action = #selector(saveSWSFile(_:))
+            return item
+        case .saveAsFile:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "另存为"
+            item.paletteLabel = "另存为 .sws"
+            item.toolTip = "选择位置和文件名保存 .sws 副本"
+            item.image = NSImage(systemSymbolName: "doc.badge.plus", accessibilityDescription: "另存为")
+            item.target = self
+            item.action = #selector(saveAsSWSFile(_:))
             return item
         case .toggleLayout:
             let popUp = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -956,9 +993,9 @@ extension ScriptwritingPlugin: NSToolbarDelegate {
 private extension NSToolbarItem.Identifier {
     static let modeSwitch = NSToolbarItem.Identifier("com.wanger.modeSwitch")
     static let openFile = NSToolbarItem.Identifier("com.wanger.openSWS")
-    static let reload = NSToolbarItem.Identifier("com.wanger.reloadSWS")
     static let toggleLayout = NSToolbarItem.Identifier("com.wanger.toggleLayout")
     static let saveFile = NSToolbarItem.Identifier("com.wanger.saveSWS")
+    static let saveAsFile = NSToolbarItem.Identifier("com.wanger.saveAsSWS")
 }
 
 // MARK: - 编剧助手 UI 布局
@@ -997,6 +1034,34 @@ enum ScriptwritingLayout {
                 display: flex;
                 flex-direction: column;
                 overflow: hidden;
+            }
+
+            /* ========== 文档标题栏 ========== */
+            #doc-titlebar {
+                height: 28px;
+                min-height: 28px;
+                background: var(--bg-secondary);
+                border-bottom: 1px solid var(--border);
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 0 16px;
+                z-index: 12;
+            }
+            #doc-titlebar .doc-title {
+                font-size: 0.85em;
+                font-weight: 700;
+                color: var(--text-primary);
+            }
+            #doc-titlebar .doc-author {
+                font-size: 0.7em;
+                color: var(--text-muted);
+            }
+            #doc-titlebar .doc-author::before {
+                content: '✍️ ';
+            }
+            #doc-titlebar .doc-author:empty::before {
+                content: '';
             }
 
             /* ========== 剧情轴 Topbar（时间轴） ========== */
@@ -1592,6 +1657,12 @@ enum ScriptwritingLayout {
     </head>
     <body>
 
+    <!-- ===== 文档标题栏 ===== -->
+    <div id="doc-titlebar">
+        <span class="doc-title">📜 未载入剧本</span>
+        <span class="doc-author"></span>
+    </div>
+
     <!-- ===== 剧情轴 Topbar（时间轴） ===== -->
     <div id="storybar">
         <div class="storybar-header">
@@ -1658,8 +1729,8 @@ enum ScriptwritingLayout {
         <!-- ===== Timeline View（时间轴编辑模式） ===== -->
         <div id="timeline-area">
             <div class="timeline-header">
-                <span class="timeline-title">📋 时间轴</span>
-                <span class="timeline-subtitle">场景概览</span>
+                <span class="timeline-title">📋 场景卡片</span>
+                <span class="timeline-subtitle">— 场 · — 个角色</span>
             </div>
             <div class="timeline-scroll" id="timeline-scroll">
                 <!-- 加载 .sws 文件后由 Swift 端动态渲染 -->
@@ -1826,11 +1897,17 @@ enum ScriptwritingLayout {
             var title = data.title || '';
             var author = data.author || '';
 
-            // 更新窗口标题区
-            var titleEl = document.querySelector('.timeline-title');
-            var subtitleEl = document.querySelector('.timeline-subtitle');
-            if (titleEl) titleEl.textContent = title ? '📋 ' + title : '📋 时间轴';
-            if (subtitleEl) subtitleEl.textContent = scenes.length + ' 场 · ' + characters.length + ' 个角色';
+            // 更新文档标题栏
+            var docTitleEl = document.querySelector('#doc-titlebar .doc-title');
+            var docAuthorEl = document.querySelector('#doc-titlebar .doc-author');
+            if (docTitleEl) docTitleEl.textContent = title ? '📜 ' + title : '📜 未命名剧本';
+            if (docAuthorEl) docAuthorEl.textContent = author || '';
+
+            // 更新时间轴 header 统计信息
+            var statsTitleEl = document.querySelector('.timeline-title');
+            var statsSubEl = document.querySelector('.timeline-subtitle');
+            if (statsTitleEl) statsTitleEl.textContent = '📋 场景卡片';
+            if (statsSubEl) statsSubEl.textContent = scenes.length + ' 场 · ' + characters.length + ' 个角色';
 
             // ── 渲染顶部剧情块 ──
             var blocksContainer = document.querySelector('.story-blocks');
@@ -1976,7 +2053,7 @@ enum ScriptwritingLayout {
                     var id = 'char-sid-' + name.replace(/[^a-zA-Z0-9\\u4e00-\\u9fff]/g, '');
                     charHTML += '<div class="char-item' + (idx === 0 ? ' active' : '') + '" data-char="' + id + '">';
                     charHTML += '<div class="avatar" style="background:' + color + '22;color:' + color + ';">' + avatar + '</div>';
-                    charHTML += '<div class="info"><div class="name">' + escHTML(name) + '</div><div class="role">' + (data.title ? data.title + ' · ' : '') + '角色</div></div>';
+                    charHTML += '<div class="info"><div class="name">' + escHTML(name) + '</div><div class="role">角色</div></div>';
                     charHTML += '</div>';
                 });
                 charList.innerHTML = charHTML;
@@ -1995,7 +2072,7 @@ enum ScriptwritingLayout {
 
             // 更新剧情轴 hint
             var hintEl = document.querySelector('.storybar-header .hint');
-            if (hintEl && data.title) hintEl.textContent = data.title;
+            if (hintEl) hintEl.textContent = scenes.length + ' 场 · ' + characters.length + ' 个角色';
 
             console.log('[Timeline] 已渲染 ' + scenes.length + ' 场, ' + characters.length + ' 个角色');
         };
