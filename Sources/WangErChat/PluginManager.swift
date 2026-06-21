@@ -72,10 +72,12 @@ extension PluginManager: NSWindowDelegate {
 }
 
 // MARK: - 编剧助手 Plugin
-class ScriptwritingPlugin: NSObject, WangErPlugin {
+class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
     let name = "编剧助手"
     let pluginDescription = "AI 辅助剧本创作与一致性分析"
 
+    /// 页面是否加载完成（避免竞态：loadHTMLString 是异步的）
+    private var isPageLoaded = false
     /// 当前加载的 .sws 文件路径
     private var currentFileURL: URL?
     /// 当前解析的文档（用于重新渲染）
@@ -130,13 +132,13 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
         ])
 
         // 先加载默认空布局
+        webView.navigationDelegate = self
         webView.loadHTMLString(ScriptwritingLayout.html, baseURL: nil)
 
         // 工具栏（文件操作按钮）
         setupToolbar(in: window, webView: webView)
 
-        // 恢复上次打开的 .sws 文件（如果有）
-        restoreLastSession(webView: webView)
+        // ⚠️ restoreLastSession 移到 didFinishNavigation，等 HTML 加载完再恢复
 
         return window
     }
@@ -194,6 +196,14 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
         }
     }
 
+    // MARK: - WKNavigationDelegate
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        isPageLoaded = true
+        // 页面加载完毕后恢复上次 session（如果有）
+        restoreLastSession(webView: webView)
+    }
+
     /// 恢复上次打开的 .sws 文件（如果有且文件仍存在）
     private func restoreLastSession(webView: WKWebView) {
         guard let path = UserDefaults.standard.string(forKey: Self.lastSWSFileKey) else { return }
@@ -209,44 +219,135 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
     private static let lastSWSFileKey = "com.wanger.lastSWSFile"
 
     private func renderCurrentDocument() {
-        guard let document = currentDocument else { return }
-
-        // 找到该插件窗口的 WKWebView
-        guard let window = NSApp.windows.first(where: { $0.title.contains("编剧助手") || $0.title.hasSuffix(".sws") }),
-              let contentView = window.contentView,
-              let webView = contentView.subviews.first(where: { $0 is WKWebView }) as? WKWebView else {
+        guard let document = currentDocument else {
+            print("[PluginManager] renderCurrentDocument: currentDocument is nil, skip")
             return
         }
+        guard let webView = scriptwritingWebView else {
+            print("[PluginManager] renderCurrentDocument: scriptwritingWebView is nil, skip")
+            return
+        }
+        print("[PluginManager] renderCurrentDocument: webView OK, isPageLoaded=\(isPageLoaded), scenes=\(document.scenes.count)")
 
         // 生成角色→颜色映射（全局一致，跨场景同角色同色）
         let characterColors = SWSRenderer.buildCharacterColorMap(document: document)
 
         let bodyHTML = SWSRenderer.renderBody(document: document, style: currentStyle, characterColors: characterColors)
-        // 还原 title/author（renderBody 不含，需要 full render 提取）
         let fullHTML = SWSRenderer.render(document: document, style: currentStyle, characterColors: characterColors)
 
-        // 从 fullHTML 中提取 title 和 author（用于编辑器头）
+        // 从 fullHTML 中提取 title 和 author
         let titleMatch = fullHTML.range(of: "<div class='sws-title'[^>]*>([\\s\\S]*?)</div>", options: .regularExpression)
         let authorMatch = fullHTML.range(of: "<div class='sws-author'[^>]*>([\\s\\S]*?)</div>", options: .regularExpression)
         let titleHTML = titleMatch.flatMap { String(fullHTML[$0]) } ?? ""
         let authorHTML = authorMatch.flatMap { String(fullHTML[$0]) } ?? ""
 
-        let escapedBody = bodyHTML
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "")
-        let escapedFull = (titleHTML + authorHTML + bodyHTML)
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "")
+        // 渲染到剧本预览（base64 传 HTML）
+        let previewHTML = titleHTML + authorHTML + bodyHTML
+        let htmlB64 = previewHTML.data(using: .utf8)!.base64EncodedString(options: [])
+        print("[PluginManager] preview: html=\(previewHTML.utf8.count/1024)KB, b64=\(htmlB64.utf8.count/1024)KB")
 
-        // 渲染到剧本预览
-        let js = """
-        document.getElementById('script-wrapper').innerHTML = "\(escapedFull)";
+        // 使用 HTML 中定义的 b64decode（已验证可用）
+        let previewJS = """
+        (function(){
+            var el=document.getElementById('script-wrapper');
+            if(!el){console.error('[preview] script-wrapper MISSING');return;}
+            try {
+                var html=b64decode('\(htmlB64)');
+                el.innerHTML=html;
+                console.log('[preview] OK, innerHTML length='+el.innerHTML.length+' text='+el.innerText.substring(0,80));
+            } catch(e) {
+                console.error('[preview] FAIL: '+e.message);
+            }
+        })();
         """
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        webView.evaluateJavaScript(previewJS) { result, error in
+            if let e = error {
+                print("[PluginManager] preview JS ERROR: \(e.localizedDescription)")
+            } else {
+                print("[PluginManager] preview JS callback OK, result=\(result ?? "nil")")
+            }
+        }
+
+        // 时间轴：生成 JSON → base64 → 调用 HTML 中已验证的 renderTimelineFromSWSBase64
+        let timelineJSON = buildTimelineJSON(document: document, characterColors: characterColors)
+        let tB64 = timelineJSON.data(using: .utf8)!.base64EncodedString(options: [])
+        print("[PluginManager] timeline: json=\(timelineJSON.utf8.count/1024)KB, b64=\(tB64.utf8.count/1024)KB")
+
+        // 调用 HTML 中定义的 renderTimelineFromSWSBase64（已验证无 bug）
+        let timelineJS = "window.renderTimelineFromSWSBase64('\(tB64)');"
+        webView.evaluateJavaScript(timelineJS) { result, error in
+            if let e = error {
+                print("[PluginManager] timeline JS ERROR: \(e.localizedDescription)")
+            } else {
+                // 渲染后验证 DOM
+                let verifyJS = """
+                (function(){
+                    var el=document.getElementById('timeline-scroll');
+                    if(!el) return 'NO_TIMELINE_SCROLL';
+                    var cards=el.querySelectorAll('.scene-card');
+                    return 'cards='+cards.length;
+                })();
+                """
+                webView.evaluateJavaScript(verifyJS) { vResult, vError in
+                    print("[PluginManager] timeline verify: \(vResult ?? "nil"), error=\(vError?.localizedDescription ?? "none")")
+                }
+            }
+        }
+    }
+
+    /// 将 SWS 文档转为 JSON（供 JS 渲染时间轴用）
+    private func buildTimelineJSON(document: SWSDocument, characterColors: [String: String]) -> String {
+        var scenesJSON: [[String: Any]] = []
+        for scene in document.scenes {
+            var sceneDict: [String: Any] = [:]
+            sceneDict["number"] = scene.heading?.number ?? "?"
+            sceneDict["interiorExterior"] = scene.heading?.interiorExterior
+            sceneDict["location"] = scene.heading?.location
+            sceneDict["time"] = scene.heading?.time
+
+            var blocksJSON: [[String: Any]] = []
+            for block in scene.blocks {
+                switch block {
+                case .dialogue(let d):
+                    var dDict: [String: Any] = [
+                        "type": "dialogue",
+                        "character": d.character,
+                        "line": d.line
+                    ]
+                    if let modifier = d.modifier, !modifier.isEmpty {
+                        dDict["modifier"] = modifier
+                    }
+                    blocksJSON.append(dDict)
+                case .action(let a):
+                    blocksJSON.append([
+                        "type": "action",
+                        "text": a.text
+                    ])
+                case .unattributed(let u):
+                    blocksJSON.append([
+                        "type": "unattributed",
+                        "lines": u.lines
+                    ])
+                case .emptyLine:
+                    blocksJSON.append(["type": "emptyLine"])
+                }
+            }
+            sceneDict["blocks"] = blocksJSON
+            scenesJSON.append(sceneDict)
+        }
+
+        var root: [String: Any] = [:]
+        root["title"] = document.metadata.title ?? ""
+        root["author"] = document.metadata.author ?? ""
+        root["characters"] = document.allCharacters
+        root["characterColors"] = characterColors
+        root["scenes"] = scenesJSON
+
+        guard let data = try? JSONSerialization.data(withJSONObject: root, options: []),
+              let json = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return json
     }
 
     @objc func reloadFile(_ sender: Any?) {
@@ -1514,76 +1615,13 @@ enum ScriptwritingLayout {
             </div>
         </div>
         <div class="storybar-timeline" id="timeline">
-            <!-- 剧情块 -->
-            <div class="story-blocks">
-                <div class="story-block" data-tone="warm" style="width:17%;" data-scene="1" title="书房诀别">
-                    <span class="block-label">诀别</span>
-                    <span class="block-tone">暖 · 不舍</span>
-                </div>
-                <div class="story-block" data-tone="cool" style="width:17%;" data-scene="2" title="码头回忆">
-                    <span class="block-label">回忆</span>
-                    <span class="block-tone">冷 · 追思</span>
-                </div>
-                <div class="story-block" data-tone="tense" style="width:17%;" data-scene="3" title="孤独等待">
-                    <span class="block-label">等待</span>
-                    <span class="block-tone">郁 · 孤独</span>
-                </div>
-                <div class="story-block" data-tone="warm" style="width:17%;" data-scene="4" title="茶馆揭示">
-                    <span class="block-label">揭示</span>
-                    <span class="block-tone">暖 · 曙光</span>
-                </div>
-                <div class="story-block" data-tone="hot" style="width:17%;" data-scene="5" title="轮渡抉择">
-                    <span class="block-label">抉择</span>
-                    <span class="block-tone">灼 · 新生</span>
-                </div>
-                <div class="story-block" data-tone="cool" style="width:15%;" data-scene="6" title="身世之谜">
-                    <span class="block-label">谜底</span>
-                    <span class="block-tone">静 · 悬念</span>
-                </div>
-            </div>
-            <!-- 关键帧 -->
-            <div class="keyframe-layer">
-                <div class="keyframe-marker" style="left:8%;" data-scene="1" title="郑希远催促向南离开">
-                    <div class="pin"></div>
-                    <span class="kf-label">离别</span>
-                </div>
-                <div class="keyframe-marker" style="left:25%;" data-scene="2" title="码头回忆往事">
-                    <div class="pin"></div>
-                    <span class="kf-label">往事</span>
-                </div>
-                <div class="keyframe-marker" style="left:42%;" data-scene="3" title="林小雨收到信">
-                    <div class="pin"></div>
-                    <span class="kf-label">信</span>
-                </div>
-                <div class="keyframe-marker" style="left:58%;" data-scene="4" title="陈叔交出怀表">
-                    <div class="pin"></div>
-                    <span class="kf-label">怀表</span>
-                </div>
-                <div class="keyframe-marker" style="left:75%;" data-scene="5" title="向南登上轮渡">
-                    <div class="pin"></div>
-                    <span class="kf-label">启程</span>
-                </div>
-                <div class="keyframe-marker" style="left:92%;" data-scene="6" title="怀表里的秘密">
-                    <div class="pin"></div>
-                    <span class="kf-label">秘密</span>
-                </div>
-            </div>
-            <!-- 情绪曲线 -->
+            <!-- 剧情块：由 renderTimelineFromSWSBase64 动态渲染 -->
+            <div class="story-blocks"></div>
+            <!-- 关键帧：由 renderTimelineFromSWSBase64 动态渲染 -->
+            <div class="keyframe-layer"></div>
+            <!-- 情绪曲线：由 renderTimelineFromSWSBase64 动态渲染 -->
             <div class="curve-layer">
-                <svg viewBox="0 0 1000 50" preserveAspectRatio="none">
-                    <path class="curve-line" id="curve-zhengyiyuan"
-                        d="M0,30 C80,28 120,20 190,22 C260,28 320,38 400,30 C480,22 520,8 600,15 C680,25 720,12 800,18 C880,24 940,20 1000,25"
-                        stroke="#e8a44a" />
-                    <path class="curve-line" id="curve-xiangnan"
-                        d="M0,18 C60,16 100,28 180,20 C260,12 320,5 400,18 C480,32 540,38 620,28 C700,20 760,8 840,15 C920,22 980,18 1000,20"
-                        stroke="#6a9fc5" />
-                    <path class="curve-line" id="curve-linxiaoyu"
-                        d="M0,22 C140,24 200,34 300,28 C400,22 480,8 580,18 C680,28 740,40 820,32 C900,24 960,22 1000,18"
-                        stroke="#b87a9a" />
-                    <path class="curve-line" id="curve-chenshu"
-                        d="M0,35 C200,32 300,28 440,22 C520,18 560,14 620,20 C680,28 720,32 800,28 C880,24 940,22 1000,25"
-                        stroke="#8a8aaa" />
-                </svg>
+                <svg viewBox="0 0 1000 50" preserveAspectRatio="none"></svg>
             </div>
         </div>
     </div>
@@ -1602,38 +1640,11 @@ enum ScriptwritingLayout {
         <div id="sidebar">
             <div class="sidebar-header">
                 <span>👥 角色</span>
-                <span class="count">4</span>
+                <span class="count">—</span>
                 <button class="add-char" title="添加角色">+</button>
             </div>
             <div class="char-list" id="char-list">
-                <div class="char-item active" data-char="zhengyiyuan">
-                    <div class="avatar">🧔</div>
-                    <div class="info">
-                        <div class="name">郑希远</div>
-                        <div class="role">主角 · 男 · 35岁</div>
-                    </div>
-                </div>
-                <div class="char-item" data-char="xiangnan">
-                    <div class="avatar">👨</div>
-                    <div class="info">
-                        <div class="name">向南</div>
-                        <div class="role">主角 · 男 · 33岁</div>
-                    </div>
-                </div>
-                <div class="char-item" data-char="linxiaoyu">
-                    <div class="avatar">👩</div>
-                    <div class="info">
-                        <div class="name">林小雨</div>
-                        <div class="role">主角 · 女 · 19岁</div>
-                    </div>
-                </div>
-                <div class="char-item" data-char="chenshu">
-                    <div class="avatar">👨‍🦳</div>
-                    <div class="info">
-                        <div class="name">陈叔</div>
-                        <div class="role">配角 · 男 · 58岁</div>
-                    </div>
-                </div>
+                <!-- 加载 .sws 文件后由 renderTimelineFromSWSBase64 动态渲染 -->
             </div>
             <div class="sidebar-footer">
                 <button title="打开角色面板">📋 详情</button>
@@ -1651,159 +1662,17 @@ enum ScriptwritingLayout {
                 <span class="timeline-subtitle">场景概览</span>
             </div>
             <div class="timeline-scroll" id="timeline-scroll">
-
-                <!-- 第1场 -->
-                <div class="scene-card" data-scene="1" id="timeline-scene-1">
-                    <div class="scene-card-header">
-                        <div class="scene-number"><span class="scene-num-circle">1</span></div>
-                        <div class="scene-meta-fields">
-                            <span class="scene-tag ie-tag">🏠 内景</span>
-                            <span class="scene-tag loc-tag">书房</span>
-                            <span class="scene-tag time-tag">☀️ 日</span>
-                        </div>
-                    </div>
-                    <div class="scene-card-body">
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">老陈站在书架前，手指划过一排排泛黄的书脊。窗外梧桐叶落了大半。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">郑希远</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">走吧。再不走就赶不上船了。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">向南</span><span class="tl-char-mod">（抬头看了一眼）</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">我还没想好。</span></div>
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">郑希远叹了口气，把手里的烟掐灭在窗台上。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">郑希远</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">你想了一年了。</span></div>
-                    </div>
+                <!-- 加载 .sws 文件后由 Swift 端动态渲染 -->
+                <div style="text-align:center;padding:80px 20px;color:var(--text-muted);">
+                    <p style="font-size:2em;margin-bottom:12px;">📋</p>
+                    <p>打开 .sws 文件后自动渲染时间轴</p>
                 </div>
-
-                <!-- 第2场 -->
-                <div class="scene-card" data-scene="2" id="timeline-scene-2">
-                    <div class="scene-card-header">
-                        <div class="scene-number"><span class="scene-num-circle">2</span></div>
-                        <div class="scene-meta-fields">
-                            <span class="scene-tag ie-tag">🌃 外景</span>
-                            <span class="scene-tag loc-tag">码头</span>
-                            <span class="scene-tag time-tag">🌅 黄昏</span>
-                        </div>
-                    </div>
-                    <div class="scene-card-body">
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">江水浑浊，汽笛声由远及近。挑夫们扛着麻袋在跳板上穿梭。远处的城市在天际线若隐若现。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">郑希远</span><span class="tl-char-mod">（望着江水）</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">你还记得咱们第一次来这儿的模样吗？那时候码头还没这么乱。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">向南</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">都变了。</span></div>
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">一个卖橘子的老妇人从他们身边走过，向南买了两斤。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">向南</span><span class="tl-char-mod">（剥着橘子）</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">那时候你身上一共就五块钱。全买了橘子。</span></div>
-                    </div>
-                </div>
-
-                <!-- 第3场 -->
-                <div class="scene-card" data-scene="3" id="timeline-scene-3">
-                    <div class="scene-card-header">
-                        <div class="scene-number"><span class="scene-num-circle">3</span></div>
-                        <div class="scene-meta-fields">
-                            <span class="scene-tag ie-tag">🏠 内景</span>
-                            <span class="scene-tag loc-tag">林小雨家客厅</span>
-                            <span class="scene-tag time-tag">🌙 夜</span>
-                        </div>
-                    </div>
-                    <div class="scene-card-body">
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">林小雨坐在沙发上，手里握着一封已经拆开的信。茶几上的茶早就凉了。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">林小雨</span><span class="tl-char-mod">（自言自语）</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">他说"很快回来"……那是春天的事了。</span></div>
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">门外传来脚步声。林小雨迅速把信塞进抽屉，擦了擦眼角。</span></div>
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">敲门声响起。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">陈叔</span><span class="tl-char-mod">（门外）</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">小雨，在家吗？我带了点桂花糕。</span></div>
-                    </div>
-                </div>
-
-                <!-- 第4场 -->
-                <div class="scene-card" data-scene="4" id="timeline-scene-4">
-                    <div class="scene-card-header">
-                        <div class="scene-number"><span class="scene-num-circle">4</span></div>
-                        <div class="scene-meta-fields">
-                            <span class="scene-tag ie-tag">🏠 内景</span>
-                            <span class="scene-tag loc-tag">茶馆</span>
-                            <span class="scene-tag time-tag">☀️ 日</span>
-                        </div>
-                    </div>
-                    <div class="scene-card-body">
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">茶馆里烟雾缭绕，评弹声从二楼飘下来。陈叔给林小雨倒了杯茶。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">陈叔</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">你爸走之前，在我这存了一样东西。</span></div>
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">他从怀里掏出一个布包，层层打开，里面是一块怀表。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">林小雨</span><span class="tl-char-mod">（接过怀表，手指颤抖）</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">这是他随身带了二十年的那块表。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">陈叔</span><span class="tl-char-mod">（低声）</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">表壳里藏了东西。他说等你二十岁才能给你。</span></div>
-                    </div>
-                </div>
-
-                <!-- 第5场 -->
-                <div class="scene-card" data-scene="5" id="timeline-scene-5">
-                    <div class="scene-card-header">
-                        <div class="scene-number"><span class="scene-num-circle">5</span></div>
-                        <div class="scene-meta-fields">
-                            <span class="scene-tag ie-tag">🌃 外景</span>
-                            <span class="scene-tag loc-tag">长江轮渡</span>
-                            <span class="scene-tag time-tag">🌅 黎明</span>
-                        </div>
-                    </div>
-                    <div class="scene-card-body">
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">轮渡在晨雾中缓缓离岸。向南靠在船舷上，手里攥着那张皱巴巴的船票。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">郑希远</span><span class="tl-char-mod">（从船舱走出来）</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">你终于上船了。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">向南</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">我想通了。有些事不是等就能等来的。</span></div>
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">太阳从江面升起，金黄的光铺满整个江面。向南眯起眼睛望着对岸。那里是新的城市，新的生活。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">郑希远</span><span class="tl-char-mod">（笑）</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">我就知道你会来。橘子都给你买好了。</span></div>
-                    </div>
-                </div>
-
-                <!-- 第6场 -->
-                <div class="scene-card" data-scene="6" id="timeline-scene-6">
-                    <div class="scene-card-header">
-                        <div class="scene-number"><span class="scene-num-circle">6</span></div>
-                        <div class="scene-meta-fields">
-                            <span class="scene-tag ie-tag">🏠 内景</span>
-                            <span class="scene-tag loc-tag">林小雨家</span>
-                            <span class="scene-tag time-tag">🌙 夜</span>
-                        </div>
-                    </div>
-                    <div class="scene-card-body">
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">林小雨用颤抖的手打开怀表后盖。里面是一张泛黄的照片——年轻时的父亲，怀里抱着一个婴儿。</span></div>
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">照片背面写着一行字：「小雨，你不是一个人。」</span></div>
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">她把照片翻过来。婴儿的眼睛很像她的。</span></div>
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">照片右边站着另一个穿旗袍的女人。不是她妈妈。</span></div>
-                        <div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">林小雨</span><span class="tl-char-mod">（对着照片）</span></div>
-                        <div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">你到底是谁……</span></div>
-                        <div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">窗外，秋雨细密地敲打着玻璃。桌上的桂花糕没人动过。</span></div>
-                    </div>
-                </div>
-
-                <!-- 加场按钮 -->
-                <div class="add-scene-card" title="添加新场">
-                    <span class="add-scene-icon">＋</span>
-                    <span class="add-scene-label">添加新场</span>
-                </div>
-
             </div>
 
             <!-- 底部时间轴 -->
             <div class="timeline-axis">
                 <div class="axis-line">
-                    <div class="axis-dot" data-scene="1" title="第1场 · 书房 · 日"><span class="axis-dot-circle"></span><span class="axis-dot-label">第1场</span></div>
-                    <div class="axis-connector"></div>
-                    <div class="axis-dot" data-scene="2" title="第2场 · 码头 · 黄昏"><span class="axis-dot-circle"></span><span class="axis-dot-label">第2场</span></div>
-                    <div class="axis-connector"></div>
-                    <div class="axis-dot" data-scene="3" title="第3场 · 林小雨家 · 夜"><span class="axis-dot-circle"></span><span class="axis-dot-label">第3场</span></div>
-                    <div class="axis-connector"></div>
-                    <div class="axis-dot" data-scene="4" title="第4场 · 茶馆 · 日"><span class="axis-dot-circle"></span><span class="axis-dot-label">第4场</span></div>
-                    <div class="axis-connector"></div>
-                    <div class="axis-dot" data-scene="5" title="第5场 · 轮渡 · 黎明"><span class="axis-dot-circle"></span><span class="axis-dot-label">第5场</span></div>
-                    <div class="axis-connector"></div>
-                    <div class="axis-dot" data-scene="6" title="第6场 · 林小雨家 · 夜"><span class="axis-dot-circle"></span><span class="axis-dot-label">第6场</span></div>
+                    <!-- 加载 .sws 文件后由 JS 动态渲染 -->
                 </div>
             </div>
         </div>
@@ -1811,9 +1680,10 @@ enum ScriptwritingLayout {
         <!-- ===== 剧本预览（只读） ===== -->
         <div id="script-area" style="display:none;">
             <div class="script-wrapper" id="script-wrapper">
-                <div style="text-align:center;padding:80px 0;color:#999;">
-                    <p style="font-size:1.2em;margin-bottom:8px;">📄 剧本预览</p>
-                    <p style="font-size:0.85em;">打开 .sws 文件后自动渲染</p>
+                <!-- 加载 .sws 文件后由 Swift 端动态渲染 -->
+                <div style="text-align:center;padding:80px 20px;color:var(--text-muted);">
+                    <p style="font-size:2em;margin-bottom:12px;">📄</p>
+                    <p>打开 .sws 文件后自动渲染预览</p>
                 </div>
             </div>
         </div>
@@ -1871,37 +1741,17 @@ enum ScriptwritingLayout {
         // 默认时间轴模式
         onModeChange('timeline');
 
-        // _renderScriptPreview — 确保剧本预览有内容（加载文件时 script-wrapper 已由 Swift 端填充）
+        // _renderScriptPreview — 确保剧本预览有内容
         window._renderScriptPreview = function() {
             var scriptWrapper = document.getElementById('script-wrapper');
             if (!scriptWrapper) return;
-            // 如果尚未加载文件，保持占位提示
-            if (!scriptWrapper.innerHTML.trim() || scriptWrapper.innerText.trim() === '📄 剧本预览\n打开 .sws 文件后自动渲染') {
-                scriptWrapper.innerHTML = '<div style="padding:80px 20px;text-align:center;color:var(--muted);font-size:1.1em;"><p style="font-size:2em;margin-bottom:12px;">📄</p><p>打开 .sws 文件后自动渲染</p></div>';
+            if (!scriptWrapper.innerText.trim() || scriptWrapper.innerText.includes('后自动渲染预览')) {
+                scriptWrapper.innerHTML = '<div style="padding:80px 20px;text-align:center;color:var(--text-muted);"><p style="font-size:2em;margin-bottom:12px;">📄</p><p>打开 .sws 文件后自动渲染预览</p></div>';
             }
         };
 
-        // ===== 时间轴节点点击（跳转到对应场景卡片，占位） =====
-        document.querySelectorAll('.axis-dot').forEach(dot => {
-            dot.addEventListener('click', () => {
-                const scene = dot.dataset.scene;
-                const card = document.getElementById('timeline-scene-' + scene);
-                if (card) {
-                    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    card.style.borderColor = 'var(--accent)';
-                    setTimeout(() => { card.style.borderColor = ''; }, 800);
-                }
-            });
-        });
-
-        // ===== 加场按钮（占位） =====
-        document.querySelector('.add-scene-card')?.addEventListener('click', () => {
-            const btn = document.querySelector('.add-scene-card');
-            btn.style.borderColor = 'var(--accent)';
-            btn.style.color = 'var(--accent)';
-            setTimeout(() => { btn.style.borderColor = ''; btn.style.color = ''; }, 300);
-            console.log('[Timeline] 添加新场 — Phase 2 实现');
-        });
+        // ===== 时间轴节点 & 加场按钮：由 renderTimelineFromSWSBase64 动态绑定 =====
+        // （初始化时 .axis-dot / .add-scene-card 尚未创建，无需绑定）
 
         // ===== 角色选中 =====
         document.getElementById('char-list').addEventListener('click', (e) => {
@@ -1941,41 +1791,219 @@ enum ScriptwritingLayout {
             document.body.style.userSelect = '';
         });
 
-        // ===== 剧情块点击（跳转到对应场次，占位） =====
-        document.querySelectorAll('.story-block').forEach(block => {
-            block.addEventListener('click', () => {
-                const scene = block.dataset.scene;
-                console.log('跳转到场次:', scene);
-                // 短暂高亮反馈
-                block.style.filter = 'brightness(1.4)';
-                setTimeout(() => { block.style.filter = ''; }, 300);
-            });
-        });
+        // ===== 剧情块 & 关键帧：由 renderTimelineFromSWSBase64 动态绑定 =====
 
-        // ===== 关键帧点击（跳转到对应位置，占位） =====
-        document.querySelectorAll('.keyframe-marker').forEach(marker => {
-            marker.addEventListener('click', () => {
-                const scene = marker.dataset.scene;
-                console.log('跳转到关键帧:', scene);
-                const pin = marker.querySelector('.pin');
-                pin.style.transform = 'scale(1.3)';
-                pin.style.background = '#ff5a70';
-                setTimeout(() => { pin.style.transform = ''; pin.style.background = ''; }, 300);
-            });
-        });
+        // ===== 角色曲线开关：由 renderTimelineFromSWSBase64 动态绑定 =====
 
-        // ===== 角色曲线开关 =====
-        document.getElementById('curve-toggles').addEventListener('click', (e) => {
-            const btn = e.target.closest('.toggle');
-            if (!btn) return;
-            btn.classList.toggle('on');
-            const char = btn.dataset.char;
-            const curve = document.getElementById('curve-' + char);
-            if (curve) {
-                curve.classList.toggle('hidden', !btn.classList.contains('on'));
+        // ===== 从 SWS JSON 数据渲染时间轴 =====
+        // Tones cycle for story blocks: warm, cool, tense, calm, hot
+        var TONES = ['warm', 'cool', 'tense', 'calm', 'hot'];
+        var IE_EMOJI = { '内景': '🏠', '外景': '🌃' };
+        var TIME_EMOJI = { '日': '☀️', '夜': '🌙', '黄昏': '🌅', '黎明': '🌅', '清晨': '🌄' };
+
+        // UTF-8 safe base64 decoder (atob only does latin1!)
+        function b64decode(b64) {
+            console.log('[b64decode] input length:', b64.length, 'first 20:', b64.substring(0,20));
+            var bin = atob(b64);
+            var bytes = new Uint8Array(bin.length);
+            for (var i = 0; i < bin.length; i++) { bytes[i] = bin.charCodeAt(i); }
+            var result = new TextDecoder('utf-8').decode(bytes);
+            console.log('[b64decode] done, output length:', result.length, 'first 40:', result.substring(0,40));
+            return result;
+        }
+
+        window.renderTimelineFromSWSBase64 = function(b64) {
+            console.log('[renderTimelineFromSWSBase64] called, b64 length:', b64.length);
+            var jsonStr;
+            try { jsonStr = b64decode(b64); } catch(e) { console.error('[timeline] base64 decode fail', e); return; }
+            var data;
+            try { data = JSON.parse(jsonStr); } catch(e) { console.error('parse SWS json fail', e); return; }
+            if (!data || !data.scenes) return;
+
+            var scenes = data.scenes;
+            var characters = data.characters || [];
+            var charColors = data.characterColors || {};
+            var title = data.title || '';
+            var author = data.author || '';
+
+            // 更新窗口标题区
+            var titleEl = document.querySelector('.timeline-title');
+            var subtitleEl = document.querySelector('.timeline-subtitle');
+            if (titleEl) titleEl.textContent = title ? '📋 ' + title : '📋 时间轴';
+            if (subtitleEl) subtitleEl.textContent = scenes.length + ' 场 · ' + characters.length + ' 个角色';
+
+            // ── 渲染顶部剧情块 ──
+            var blocksContainer = document.querySelector('.story-blocks');
+            if (blocksContainer) {
+                var pct = scenes.length > 0 ? Math.floor(90 / scenes.length) : 0;
+                var lastPct = 100 - pct * (scenes.length - 1);
+                var blockHTML = '';
+                scenes.forEach(function(sc, i) {
+                    var w = (i === scenes.length - 1) ? lastPct + '%' : pct + '%';
+                    var tone = TONES[i % TONES.length];
+                    var label = sc.location || ('第' + sc.number + '场');
+                    if (label.length > 4) label = label.substring(0,4);
+                    blockHTML += '<div class="story-block" data-tone="' + tone + '" style="width:' + w + ';" data-scene="' + sc.number + '" title="' + (sc.location || '') + '">';
+                    blockHTML += '<span class="block-label">' + label + '</span>';
+                    blockHTML += '</div>';
+                });
+                blocksContainer.innerHTML = blockHTML;
+                // rebind clicks
+                blocksContainer.querySelectorAll('.story-block').forEach(function(b) {
+                    b.addEventListener('click', function() {
+                        var sn = b.dataset.scene;
+                        var card = document.getElementById('timeline-scene-' + sn);
+                        if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.style.borderColor = 'var(--accent)'; setTimeout(function(){ card.style.borderColor = ''; }, 800); }
+                    });
+                });
             }
-        });
 
+            // ── 渲染关键帧标记 ──
+            var kfLayer = document.querySelector('.keyframe-layer');
+            if (kfLayer && scenes.length > 0) {
+                var kfHTML = '';
+                scenes.forEach(function(sc, i) {
+                    var leftPct = (i / (scenes.length - 1 || 1)) * 100;
+                    kfHTML += '<div class="keyframe-marker" style="left:' + leftPct + '%;" data-scene="' + sc.number + '" title="第' + sc.number + '场">';
+                    kfHTML += '<div class="pin"></div>';
+                    kfHTML += '<span class="kf-label">' + (sc.location || sc.number) + '</span>';
+                    kfHTML += '</div>';
+                });
+                kfLayer.innerHTML = kfHTML;
+                kfLayer.querySelectorAll('.keyframe-marker').forEach(function(m) {
+                    m.addEventListener('click', function() {
+                        var sn = m.dataset.scene;
+                        var card = document.getElementById('timeline-scene-' + sn);
+                        if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.style.borderColor = 'var(--accent)'; setTimeout(function(){ card.style.borderColor = ''; }, 800); }
+                    });
+                });
+            }
+
+            // ── 渲染角色曲线开关 ──
+            var togglesContainer = document.getElementById('curve-toggles');
+            if (togglesContainer) {
+                var togHTML = '';
+                characters.forEach(function(name) {
+                    var color = charColors[name] || '#999';
+                    var id = 'char-' + name.replace(/[^a-zA-Z0-9\\u4e00-\\u9fff]/g, '');
+                    togHTML += '<button class="toggle on" data-char="' + id + '"><span class="dot" style="color:' + color + ';"></span> ' + name + '</button>';
+                });
+                togglesContainer.innerHTML = togHTML;
+            }
+
+            // ── 渲染场景卡片（时间轴主内容） ──
+            var scroll = document.getElementById('timeline-scroll');
+            if (scroll) {
+                var cardHTML = '';
+                scenes.forEach(function(sc, i) {
+                    var ie = sc.interiorExterior || '';
+                    var loc = sc.location || '';
+                    var time = sc.time || '';
+                    var ieEmoji = IE_EMOJI[ie] || '📍';
+                    var timeEmoji = TIME_EMOJI[time] || '🕐';
+
+                    cardHTML += '<div class="scene-card" data-scene="' + sc.number + '" id="timeline-scene-' + sc.number + '">';
+                    cardHTML += '<div class="scene-card-header">';
+                    cardHTML += '<div class="scene-number"><span class="scene-num-circle">' + sc.number + '</span></div>';
+                    cardHTML += '<div class="scene-meta-fields">';
+                    if (ie) cardHTML += '<span class="scene-tag ie-tag">' + ieEmoji + ' ' + ie + '</span>';
+                    if (loc) cardHTML += '<span class="scene-tag loc-tag">' + loc + '</span>';
+                    if (time) cardHTML += '<span class="scene-tag time-tag">' + timeEmoji + ' ' + time + '</span>';
+                    cardHTML += '</div></div>';
+                    cardHTML += '<div class="scene-card-body">';
+
+                    (sc.blocks || []).forEach(function(blk) {
+                        if (blk.type === 'action') {
+                            cardHTML += '<div class="tl-block tl-action"><span class="tl-block-icon">📝</span><span class="tl-block-text">' + escHTML(blk.text || '') + '</span></div>';
+                        } else if (blk.type === 'dialogue') {
+                            cardHTML += '<div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span><span class="tl-char-name">' + escHTML(blk.character || '') + '</span>';
+                            if (blk.modifier) cardHTML += '<span class="tl-char-mod">（' + escHTML(blk.modifier) + '）</span>';
+                            cardHTML += '</div>';
+                            cardHTML += '<div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><span class="tl-block-text">' + escHTML(blk.line || '') + '</span></div>';
+                        } else if (blk.type === 'unattributed') {
+                            (blk.lines || []).forEach(function(l) {
+                                cardHTML += '<div class="tl-block tl-action" style="color:#888;font-style:italic;"><span class="tl-block-icon">💬</span><span class="tl-block-text">' + escHTML(l) + '</span></div>';
+                            });
+                        } else if (blk.type === 'emptyLine') {
+                            cardHTML += '<div style="height:6px;"></div>';
+                        }
+                    });
+
+                    cardHTML += '</div></div>';
+                });
+
+                // 保留「添加新场」按钮
+                cardHTML += '<div class="add-scene-card" title="添加新场"><span class="add-scene-icon">＋</span><span class="add-scene-label">添加新场</span></div>';
+                scroll.innerHTML = cardHTML;
+
+                // rebind add-scene
+                var addBtn = scroll.querySelector('.add-scene-card');
+                if (addBtn) {
+                    addBtn.addEventListener('click', function() {
+                        addBtn.style.borderColor = 'var(--accent)';
+                        addBtn.style.color = 'var(--accent)';
+                        setTimeout(function(){ addBtn.style.borderColor = ''; addBtn.style.color = ''; }, 300);
+                    });
+                }
+            }
+
+            // ── 渲染底部时间轴节点 ──
+            var axisLine = document.querySelector('.axis-line');
+            if (axisLine && scenes.length > 0) {
+                var axisHTML = '';
+                scenes.forEach(function(sc, i) {
+                    if (i > 0) axisHTML += '<div class="axis-connector"></div>';
+                    axisHTML += '<div class="axis-dot" data-scene="' + sc.number + '" title="第' + sc.number + '场"><span class="axis-dot-circle"></span><span class="axis-dot-label">第' + sc.number + '场</span></div>';
+                });
+                axisLine.innerHTML = axisHTML;
+                axisLine.querySelectorAll('.axis-dot').forEach(function(dot) {
+                    dot.addEventListener('click', function() {
+                        var sn = dot.dataset.scene;
+                        var card = document.getElementById('timeline-scene-' + sn);
+                        if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.style.borderColor = 'var(--accent)'; setTimeout(function(){ card.style.borderColor = ''; }, 800); }
+                    });
+                });
+            }
+
+            // ── 渲染角色列表 ──
+            var charList = document.getElementById('char-list');
+            if (charList) {
+                var charHTML = '';
+                var defaultAvatars = ['🧔','👨','👩','👨‍🦳','👩‍🦰','👴','🧑','👩‍🦱','👨‍🦱'];
+                characters.forEach(function(name, idx) {
+                    var avatar = defaultAvatars[idx % defaultAvatars.length];
+                    var color = charColors[name] || '#999';
+                    var id = 'char-sid-' + name.replace(/[^a-zA-Z0-9\\u4e00-\\u9fff]/g, '');
+                    charHTML += '<div class="char-item' + (idx === 0 ? ' active' : '') + '" data-char="' + id + '">';
+                    charHTML += '<div class="avatar" style="background:' + color + '22;color:' + color + ';">' + avatar + '</div>';
+                    charHTML += '<div class="info"><div class="name">' + escHTML(name) + '</div><div class="role">' + (data.title ? data.title + ' · ' : '') + '角色</div></div>';
+                    charHTML += '</div>';
+                });
+                charList.innerHTML = charHTML;
+                // rebind character selection
+                charList.addEventListener('click', function(e) {
+                    var item = e.target.closest('.char-item');
+                    if (!item) return;
+                    charList.querySelectorAll('.char-item').forEach(function(el) { el.classList.remove('active'); });
+                    item.classList.add('active');
+                });
+            }
+
+            // 更新角色计数
+            var countEl = document.querySelector('.sidebar-header .count');
+            if (countEl) countEl.textContent = characters.length;
+
+            // 更新剧情轴 hint
+            var hintEl = document.querySelector('.storybar-header .hint');
+            if (hintEl && data.title) hintEl.textContent = data.title;
+
+            console.log('[Timeline] 已渲染 ' + scenes.length + ' 场, ' + characters.length + ' 个角色');
+        };
+
+        function escHTML(s) {
+            if (!s) return '';
+            return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
 
     </script>
     </body>
