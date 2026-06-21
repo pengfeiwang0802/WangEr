@@ -870,17 +870,17 @@ enum ScriptwritingLayout {
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
             :root {
-                --bg-primary:   #1a1a2e;
-                --bg-secondary: #222240;
-                --bg-tertiary:  #2a2a4a;
-                --bg-editor:    #1e1e32;
-                --border:       #3a3a55;
-                --text-primary: #e0e0e0;
-                --text-secondary: #a0a0b0;
-                --text-muted:   #6a6a80;
+                --bg-primary:   #ffffff;
+                --bg-secondary: #f5f5f5;
+                --bg-tertiary:  #e8e8e8;
+                --bg-editor:    #ffffff;
+                --border:       #d0d0d0;
+                --text-primary: #1a1a1a;
+                --text-secondary: #555555;
+                --text-muted:   #999999;
                 --accent:       #e94560;
-                --accent-soft:  rgba(233,69,96,0.15);
-                --gold:         #f5a623;
+                --accent-soft:  rgba(233,69,96,0.08);
+                --gold:         #d4920a;
                 --sidebar-w:    200px;
                 --topbar-h:     44px;
                 --storybar-h:  130px;
@@ -994,9 +994,9 @@ enum ScriptwritingLayout {
                 position: relative;
             }
             .story-block:hover {
-                filter: brightness(1.15);
+                filter: brightness(1.1);
                 transform: translateY(-1px);
-                box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+                box-shadow: 0 2px 8px rgba(0,0,0,0.12);
             }
             .story-block .block-label {
                 z-index: 1;
@@ -1035,7 +1035,7 @@ enum ScriptwritingLayout {
                 border-radius: 2px 2px 50% 50%;
                 background: var(--accent);
                 margin-bottom: 2px;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
                 position: relative;
             }
             .keyframe-marker .pin::after {
@@ -1264,11 +1264,13 @@ enum ScriptwritingLayout {
                 background: var(--bg-secondary);
                 border: 1px solid var(--border);
                 border-radius: 10px;
-                overflow: hidden;
+                overflow: visible;
+                flex-shrink: 0;
                 transition: border-color 0.15s;
             }
             .scene-card:hover {
                 border-color: var(--accent);
+                box-shadow: 0 2px 8px rgba(0,0,0,0.06);
             }
             .scene-card-header {
                 display: flex;
@@ -1277,6 +1279,7 @@ enum ScriptwritingLayout {
                 padding: 10px 14px;
                 background: var(--bg-tertiary);
                 border-bottom: 1px solid var(--border);
+                border-radius: 10px 10px 0 0;
             }
             .scene-number { flex-shrink: 0; }
             .scene-num-circle {
@@ -1334,10 +1337,10 @@ enum ScriptwritingLayout {
                 opacity: 0.6;
             }
             .tl-block.tl-action {
-                color: #9cb89c;
+                color: #5a8a5a;
             }
             .tl-block.tl-dialogue {
-                color: #7eb8da;
+                color: #4a80a8;
             }
             .tl-block.tl-dialogue-text {
                 color: var(--text-primary);
@@ -1398,8 +1401,9 @@ enum ScriptwritingLayout {
                 margin: 40px auto;
                 padding: 60px 50px;
                 background: #ffffff;
-                box-shadow: 0 2px 20px rgba(0,0,0,0.06);
+                box-shadow: 0 1px 8px rgba(0,0,0,0.04);
                 border-radius: 2px;
+                border: 1px solid #e8e8e8;
                 color: #1a1a1a;
                 font-size: 15px;
                 line-height: 1.8;
@@ -1468,8 +1472,8 @@ enum ScriptwritingLayout {
             /* ========== 滚动条 ========== */
             ::-webkit-scrollbar { width: 6px; }
             ::-webkit-scrollbar-track { background: transparent; }
-            ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-            ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+            ::-webkit-scrollbar-thumb { background: #cccccc; border-radius: 3px; }
+            ::-webkit-scrollbar-thumb:hover { background: #aaaaaa; }
 
             /* ========== Resize Handle ========== */
             #resize-handle {
