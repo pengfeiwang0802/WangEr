@@ -43,6 +43,18 @@ public struct SWSDocument: Codable {
     public var totalBlockCount: Int {
         scenes.reduce(0) { $0 + $1.blocks.count }
     }
+
+    /// 按场号查找一场戏
+    public func scene(byNumber number: String) -> SWSScene? {
+        scenes.first { $0.heading?.number == number }
+    }
+
+    /// 所有场景 id 列表（用于目录导航），无场号时回退到索引
+    public var allSceneIds: [String] {
+        scenes.enumerated().map { (i, scene) in
+            scene.sceneId ?? "scene-idx-\(i)"
+        }
+    }
 }
 
 // MARK: - Metadata
@@ -86,6 +98,12 @@ public struct SWSScene: Codable {
     public init(heading: SWSSceneHeading? = nil, blocks: [SWSBlock] = []) {
         self.heading = heading
         self.blocks = blocks
+    }
+
+    /// 场景唯一标识，基于场号（如 "scene-1"）
+    public var sceneId: String? {
+        guard let number = heading?.number, !number.isEmpty else { return nil }
+        return "scene-\(number)"
     }
 
     /// 本场所有出场角色（去重，按出场顺序）

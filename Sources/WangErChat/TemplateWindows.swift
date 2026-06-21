@@ -499,9 +499,12 @@ class TemplateEditorWindow: NSObject {
     private func buildCurrentTemplate() -> FormatTemplate {
         var t = editingTemplate ?? FormatTemplate(name: "")
         t.name = nameField?.stringValue.trimmingCharacters(in: .whitespaces) ?? ""
-        t.characterLayout = CharacterLayoutOption.allCases[characterPopup?.indexOfSelectedItem ?? 0]
-        t.modifierBracket = ModifierBracketChoice.allCases[modifierPopup?.indexOfSelectedItem ?? 0]
-        t.sceneHeadingFormat = SceneHeadingFormatChoice.allCases[headingPopup?.indexOfSelectedItem ?? 0]
+        let charIdx = max(0, characterPopup?.indexOfSelectedItem ?? 0)
+        t.characterLayout = CharacterLayoutOption.allCases[charIdx]
+        let modIdx = max(0, modifierPopup?.indexOfSelectedItem ?? 0)
+        t.modifierBracket = ModifierBracketChoice.allCases[modIdx]
+        let headIdx = max(0, headingPopup?.indexOfSelectedItem ?? 0)
+        t.sceneHeadingFormat = SceneHeadingFormatChoice.allCases[headIdx]
         return t
     }
 

@@ -87,12 +87,12 @@ public enum SWSRenderer {
     ) -> String {
         var html = ""
 
-        // 标题
+        // 标题 / 作者（inline style 确保不依赖外部 CSS）
         if let title = document.metadata.title {
-            html += "<div class=\"sws-title\">\(escapeHTML(title))</div>"
+            html += "<div class=\"sws-title\" style=\"font-size:20px;font-weight:bold;text-align:center;margin-bottom:8px\">\(escapeHTML(title))</div>"
         }
         if let author = document.metadata.author {
-            html += "<div class=\"sws-author\">\(escapeHTML(author))</div>"
+            html += "<div class=\"sws-author\" style=\"font-size:14px;text-align:center;color:#666;margin-bottom:24px\">\(escapeHTML(author))</div>"
         }
 
         // 场景
@@ -113,7 +113,8 @@ public enum SWSRenderer {
         characterColors: [String: String]? = nil,
         editable: Bool = true
     ) -> String {
-        var html = "<div class=\"sws-scene\" data-scene=\"\(index)\">"
+        let anchorId = scene.sceneId ?? "scene-idx-\(index)"
+        var html = "<div class=\"sws-scene\" id=\"\(anchorId)\" data-scene=\"\(index)\">"
 
         // 场景头
         if let heading = scene.heading {

@@ -120,6 +120,9 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
         // 添加工具栏按钮（通过 WKWebView 的 JS 通信，或直接加 NSButton 到 window）
         setupToolbar(in: window, webView: webView)
 
+        // 恢复上次打开的 .sws 文件（如果有）
+        restoreLastSession(webView: webView)
+
         return window
     }
 
@@ -154,6 +157,9 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
             currentFileURL = url
             currentDocument = document
 
+            // 持久化：记住最后打开的文件，下次打开编辑器自动恢复
+            UserDefaults.standard.set(url.path, forKey: ScriptwritingPlugin.lastSWSFileKey)
+
             // 更新窗口标题
             if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "scriptwriting" }) ??
                 NSApp.windows.first(where: { $0.title.hasPrefix("✍️") }) {
@@ -171,6 +177,20 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
             print("ScriptwritingPlugin: 加载文件失败 \(error)")
         }
     }
+
+    /// 恢复上次打开的 .sws 文件（如果有且文件仍存在）
+    private func restoreLastSession(webView: WKWebView) {
+        guard let path = UserDefaults.standard.string(forKey: Self.lastSWSFileKey) else { return }
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: path) else {
+            // 文件已被移动或删除，清除记录，编辑器保持空白
+            UserDefaults.standard.removeObject(forKey: Self.lastSWSFileKey)
+            return
+        }
+        loadSWSFile(url: url)
+    }
+
+    private static let lastSWSFileKey = "com.wanger.lastSWSFile"
 
     private func renderCurrentDocument() {
         guard let document = currentDocument else { return }
@@ -409,7 +429,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin {
 
             // 根据 data-line-type 重建 SWSDocument
             let document = self.buildDocumentFromLines(lines)
-            var formatter = SWSFormatter()
+            let formatter = SWSFormatter()
             let output = formatter.serialize(document)
 
             do {
@@ -765,65 +785,6 @@ private extension NSToolbarItem.Identifier {
 
 // MARK: - 编剧助手 UI 布局
 enum ScriptwritingLayout {
-    /// 额外 CSS，注入到 SWSRenderer 的 HTML 中
-    static let extraCSS = """
-        /* 编辑器区域覆盖 SWS 默认样式 */
-        #editor-area .editor-body {
-            padding: 32px 48px;
-            max-width: 720px;
-            margin: 0 auto;
-        }
-        #editor-area .editor-body .sws-scene-heading {
-            font-weight: 700;
-            font-size: 1.05em;
-            text-align: left;
-            margin: 20px 0 8px;
-            color: var(--gold);
-        }
-        #editor-area .editor-body .sws-action {
-            margin: 8px 0;
-            line-height: 1.7;
-        }
-        #editor-area .editor-body .sws-character {
-            text-align: center;
-            font-weight: 700;
-            margin: 16px 0 0;
-        }
-        #editor-area .editor-body .sws-parenthetical {
-            text-align: left;
-            font-style: italic;
-            margin: 2px 0 0;
-            padding-left: 2.5em;
-            color: var(--text-secondary);
-            font-size: 0.9em;
-        }
-        #editor-area .editor-body .sws-dialogue {
-            margin: 2px 0 8px;
-            padding: 0 3em;
-            line-height: 1.5;
-        }
-        #editor-area .editor-body .sws-unattributed {
-            margin: 8px 0;
-            padding: 0 3em;
-            line-height: 1.5;
-            font-style: italic;
-            color: var(--text-muted);
-        }
-        #editor-area .editor-body .sws-quote {
-            margin: 8px 0;
-            padding: 8px 3em;
-            border-left: 3px solid var(--accent);
-            background: var(--accent-soft);
-            line-height: 1.5;
-        }
-        #editor-area .editor-body .sws-separator {
-            text-align: center;
-            margin: 20px 0;
-            color: var(--text-muted);
-            opacity: 0.4;
-        }
-    """
-
     static let html = """
     <!DOCTYPE html>
     <html lang="zh-CN">
@@ -1302,102 +1263,22 @@ enum ScriptwritingLayout {
             #editor-area .editor-body {
                 flex: 1;
                 overflow-y: auto;
-                padding: 32px 48px;
+                padding: 20px;
+                background: #ffffff;
+                color: #1a1a1a;
             }
             #editor-area .editor-body:focus {
                 outline: none;
             }
 
-            /* ========== 剧本格式定义 ========== */
-            #editor-area .editor-body .scene-heading {
-                font-weight: 700;
-                font-size: 1.05em;
-                text-align: left;
-                margin: 20px 0 8px;
-                color: var(--gold);
-            }
-            #editor-area .editor-body .action {
-                margin: 8px 0;
-                line-height: 1.7;
-            }
-            #editor-area .editor-body .character {
-                text-align: center;
-                font-weight: 700;
-                margin: 16px 0 0;
-                padding-left: 2em;
-            }
-            #editor-area .editor-body .parenthetical {
-                text-align: left;
-                font-style: italic;
-                margin: 2px 0 0;
-                padding-left: 2.5em;
-                color: var(--text-secondary);
-                font-size: 0.9em;
-            }
-            #editor-area .editor-body .dialogue {
-                margin: 2px 0 8px;
-                padding: 0 3em;
-                line-height: 1.5;
-            }
-            #editor-area .editor-body .transition {
-                text-align: right;
-                margin: 12px 0;
-                font-style: italic;
-                color: var(--text-muted);
-            }
-
-            /* ========== 语义类型颜色标识 ==========
-               让编剧一眼看出系统如何解析每行内容
-            */
-            /* 场号 - 金色高亮 + 加粗 */
-            #editor-area .editor-body [data-sws-type="scene-heading"],
-            #editor-area .editor-body .sws-scene-heading {
-                background: rgba(245, 166, 35, 0.12);
-                border-left: 3px solid var(--gold);
-                padding-left: 12px;
-                font-weight: 700 !important;
-            }
-            /* 对白 - 角色名行用青色系 */
-            #editor-area .editor-body .sws-dialogue-name {
-                color: #5bc0de;
-                font-weight: 600;
-            }
-            /* 对白 - 台词文本用浅蓝色 */
-            #editor-area .editor-body .sws-dialogue-text {
-                color: #b0d4f1;
-            }
-            /* 对白块整体左边界指示 */
-            #editor-area .editor-body [data-sws-type="dialogue"] {
-                border-left: 2px solid rgba(91, 192, 222, 0.25);
-                padding-left: 8px;
-            }
-            /* 动作描述 - 灰绿色 */
-            #editor-area .editor-body [data-sws-type="action"],
-            #editor-area .editor-body .sws-action {
-                color: #8fbc8f;
-            }
-            /* 未标注对白 - 淡紫色 */
-            #editor-area .editor-body [data-sws-type="unattributed"],
+            /* SWS 结构性规则（仅文本换行/间距，不覆盖内联样式） */
+            #editor-area .editor-body .sws-dialogue-text,
+            #editor-area .editor-body .sws-action,
             #editor-area .editor-body .sws-unattributed {
-                color: #c9a0dc;
-                font-style: italic;
+                white-space: pre-wrap;
+                word-wrap: break-word;
             }
-            /* 硬编码示例内容的类名映射（兼容） */
-            #editor-area .editor-body .scene-heading {
-                background: rgba(245, 166, 35, 0.12);
-                border-left: 3px solid var(--gold);
-                padding-left: 12px;
-            }
-            #editor-area .editor-body .character {
-                color: #5bc0de;
-                font-weight: 600;
-            }
-            #editor-area .editor-body .dialogue {
-                color: #b0d4f1;
-            }
-            #editor-area .editor-body .action {
-                color: #8fbc8f;
-            }
+            #editor-area .editor-body .sws-empty-line { height: 1em; }
 
             /* ========== 侧边栏折叠 ========== */
             #sidebar.collapsed {
@@ -1580,18 +1461,7 @@ enum ScriptwritingLayout {
                 <span class="sep"></span>
                 <button title="折叠侧边栏" id="btn-toggle-sidebar">📂</button>
             </div>
-            <div class="editor-body" contenteditable="true" id="editor-body">
-                <div class="scene-heading">第 1 场 · 内景 · 张三的公寓 · 白天</div>
-                <div class="action">阳光透过半掩的窗帘洒进房间，空气中飘着咖啡的香气。张三坐在书桌前，盯着电脑屏幕发呆。桌上堆满了文件和空咖啡杯。</div>
-                <div class="character">张三</div>
-                <div class="parenthetical">（揉了揉眼睛，叹了口气）</div>
-                <div class="dialogue">又是新的一天……到底该从哪里开始呢？</div>
-                <div class="action">他站起身，走到窗边，拉开窗帘。楼下的街道已经开始忙碌起来。</div>
-                <div class="character">李四</div>
-                <div class="parenthetical">（从门外探头进来）</div>
-                <div class="dialogue">还在发呆？会议十点就开始了！</div>
-                <div class="dialogue">你不会又熬夜了吧？</div>
-            </div>
+            <div class="editor-body" contenteditable="true" id="editor-body"></div>
         </div>
 
     </div>
