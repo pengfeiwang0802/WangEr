@@ -104,16 +104,6 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
         guard let contentView = window.contentView else { return window }
 
-        // 原生模式切换控件（放在 webView 上方，不用 toolbar item 避免点击事件被吞）
-        let modeSwitch = NSSegmentedControl(labels: ["📋 时间轴", "📄 剧本"],
-                                            trackingMode: .selectOne,
-                                            target: self,
-                                            action: #selector(modeSwitchChanged(_:)))
-        modeSwitch.selectedSegment = 0
-        modeSwitch.segmentStyle = .texturedRounded
-        modeSwitch.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(modeSwitch)
-
         let webView = WKWebView(frame: .zero)
         webView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -122,10 +112,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         contentView.addSubview(webView)
 
         NSLayoutConstraint.activate([
-            modeSwitch.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            modeSwitch.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
-
-            webView.topAnchor.constraint(equalTo: modeSwitch.bottomAnchor, constant: 8),
+            webView.topAnchor.constraint(equalTo: contentView.topAnchor),
             webView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             webView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
@@ -448,48 +435,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         fallbackToggleLayout()
     }
 
-    /// 原生 NSSegmentedControl 切换时间轴/剧本模式
-    /// 直接操作 DOM，不依赖 window.onModeChange（避免 WKWebView JS 函数引用丢失问题）
-    @objc func modeSwitchChanged(_ sender: NSSegmentedControl) {
-        let isTimeline = sender.selectedSegment == 0
-        let mode = isTimeline ? "timeline" : "script"
-        print("[PluginManager] modeSwitchChanged: \(mode), webView=\(scriptwritingWebView != nil ? "OK" : "NIL")")
 
-        // 在 Swift 端决定模式布尔值，JS 端只做 DOM 操作（零依赖，全直接）
-        let js = """
-        (function() {
-            var isTimeline = \(isTimeline ? "true" : "false");
-            var tla = document.getElementById('timeline-area');
-            var sca = document.getElementById('script-area');
-            var sdb = document.getElementById('sidebar');
-            var hdl = document.getElementById('resize-handle');
-            var lbl = document.getElementById('mode-label');
-            var btn = document.getElementById('btn-toggle-sidebar');
-
-            if (tla) tla.style.display = isTimeline ? 'flex' : 'none';
-            if (sca) sca.style.display = isTimeline ? 'none' : '';
-            if (sdb) {
-                if (isTimeline) { sdb.classList.remove('collapsed'); }
-                else { sdb.classList.add('collapsed'); }
-            }
-            if (hdl) hdl.style.display = isTimeline ? '' : 'none';
-            if (lbl) lbl.textContent = isTimeline ? '📋 时间轴（编辑）' : '📄 剧本（只读预览）';
-            if (btn) btn.textContent = '📂';
-
-            // 切换到剧本模式时，刷新预览
-            if (!isTimeline && typeof window._renderScriptPreview === 'function') {
-                window._renderScriptPreview();
-            }
-        })();
-        """
-        scriptwritingWebView?.evaluateJavaScript(js) { result, error in
-            if let error = error {
-                print("[PluginManager] modeSwitchChanged JS error: \(error.localizedDescription)")
-            } else {
-                print("[PluginManager] modeSwitchChanged JS OK, result=\(result ?? "nil")")
-            }
-        }
-    }
 
     @objc func popUpLayoutChanged(_ sender: NSPopUpButton) {
         guard let selectedItem = sender.selectedItem,
@@ -684,7 +630,6 @@ extension ScriptwritingPlugin: NSToolbarDelegate {
 }
 
 private extension NSToolbarItem.Identifier {
-    static let modeSwitch = NSToolbarItem.Identifier("com.wanger.modeSwitch")
     static let openFile = NSToolbarItem.Identifier("com.wanger.openSWS")
     static let toggleLayout = NSToolbarItem.Identifier("com.wanger.toggleLayout")
     static let saveFile = NSToolbarItem.Identifier("com.wanger.saveSWS")
@@ -1114,7 +1059,7 @@ enum ScriptwritingLayout {
                 color: var(--text-primary);
             }
 
-            /* ========== 模式切换栏（显示区左上方） ========== */
+            /* ========== 视图工具栏 ========== */
             #mode-toolbar {
                 height: 34px;
                 min-height: 34px;
@@ -1122,16 +1067,52 @@ enum ScriptwritingLayout {
                 border-bottom: 1px solid var(--border);
                 display: flex;
                 align-items: center;
+                justify-content: space-between;
                 padding: 0 16px;
                 gap: 6px;
                 position: relative;
                 z-index: 20;
             }
-            #mode-toolbar .mode-label {
-                font-size: 0.7em;
+            #mode-toolbar .mode-toggle-group {
+                display: flex;
+                background: var(--bg-tertiary);
+                border-radius: 6px;
+                overflow: hidden;
+                border: 1px solid var(--border);
+            }
+            #mode-toolbar .mode-btn {
+                background: transparent;
+                border: none;
                 color: var(--text-muted);
-                margin-left: auto;
-                opacity: 0.5;
+                padding: 4px 12px;
+                font-size: 0.78em;
+                cursor: pointer;
+                font-family: inherit;
+                transition: all 0.15s;
+            }
+            #mode-toolbar .mode-btn:hover {
+                color: var(--text-primary);
+                background: rgba(255,255,255,0.05);
+            }
+            #mode-toolbar .mode-btn.active {
+                background: var(--accent);
+                color: #fff;
+                font-weight: 600;
+            }
+            #mode-toolbar > button {
+                background: transparent;
+                border: 1px solid var(--border);
+                color: var(--text-muted);
+                padding: 3px 8px;
+                border-radius: 5px;
+                cursor: pointer;
+                font-size: 0.85em;
+                transition: all 0.15s;
+            }
+            #mode-toolbar > button:hover {
+                background: var(--accent-soft);
+                border-color: var(--accent);
+                color: var(--text-primary);
             }
 
             /* ========== Timeline 视图 ========== */
@@ -1565,11 +1546,13 @@ enum ScriptwritingLayout {
         </div>
     </div>
 
-    <!-- ===== 显示区模式切换栏 ===== -->
+    <!-- ===== 视图工具栏 ===== -->
     <div id="mode-toolbar">
         <button title="折叠项目侧边栏" id="btn-toggle-project-sidebar">📁</button>
-        <span class="mode-label" id="mode-label">📋 时间轴（编辑）</span>
-        <span style="flex:1;"></span>
+        <div class="mode-toggle-group">
+            <button class="mode-btn active" data-mode="timeline">📋 时间轴</button>
+            <button class="mode-btn" data-mode="script">📄 剧本</button>
+        </div>
         <button title="折叠角色侧栏" id="btn-toggle-sidebar">📂</button>
     </div>
 
@@ -1631,6 +1614,40 @@ enum ScriptwritingLayout {
     </div>
 
     <script>
+        // ===== 模式切换（时间轴 / 剧本） =====
+        function switchMode(mode) {
+            const isTimeline = mode === 'timeline';
+            const tla = document.getElementById('timeline-area');
+            const sca = document.getElementById('script-area');
+            const sdb = document.getElementById('sidebar');
+            const hdl = document.getElementById('resize-handle');
+
+            if (tla) tla.style.display = isTimeline ? 'flex' : 'none';
+            if (sca) sca.style.display = isTimeline ? 'none' : '';
+            if (sdb) {
+                if (isTimeline) { sdb.classList.remove('collapsed'); }
+                else { sdb.classList.add('collapsed'); }
+            }
+            if (hdl) hdl.style.display = isTimeline ? '' : 'none';
+
+            // 更新按钮激活态
+            document.querySelectorAll('.mode-btn').forEach(function(b) {
+                b.classList.toggle('active', b.dataset.mode === mode);
+            });
+
+            // 切换到剧本模式时，刷新预览
+            if (!isTimeline && typeof window._renderScriptPreview === 'function') {
+                window._renderScriptPreview();
+            }
+        }
+
+        // 绑定模式切换按钮
+        document.querySelectorAll('.mode-btn').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                switchMode(this.dataset.mode);
+            });
+        });
+
         // ===== 项目侧边栏 折叠 =====
         const projSidebar = document.getElementById('project-sidebar');
         const btnToggleProj = document.getElementById('btn-toggle-project-sidebar');
