@@ -712,6 +712,7 @@ enum ScriptwritingLayout {
                 --accent:       #e94560;
                 --accent-soft:  rgba(233,69,96,0.08);
                 --gold:         #d4920a;
+                --project-sidebar-w: 200px;
                 --sidebar-w:    200px;
                 --topbar-h:     44px;
                 --storybar-h:  130px;
@@ -724,9 +725,57 @@ enum ScriptwritingLayout {
                 background: var(--bg-primary);
                 color: var(--text-primary);
                 height: 100vh;
+                overflow: hidden;
+            }
+
+            #app-layout {
+                display: flex;
+                height: 100vh;
+                overflow: hidden;
+            }
+
+            /* ========== 项目侧边栏 ========== */
+            #project-sidebar {
+                width: var(--project-sidebar-w);
+                min-width: 160px;
+                background: var(--bg-secondary);
+                border-right: 1px solid var(--border);
                 display: flex;
                 flex-direction: column;
                 overflow: hidden;
+            }
+            #project-sidebar.collapsed {
+                width: 0;
+                min-width: 0;
+                border-right: none;
+                overflow: hidden;
+            }
+            #project-sidebar .proj-sidebar-header {
+                padding: 12px 14px 8px;
+                font-size: 0.75em;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 1.2px;
+                color: var(--text-muted);
+            }
+            #proj-resize-handle {
+                width: 3px;
+                cursor: col-resize;
+                background: transparent;
+                transition: background 0.15s;
+                flex-shrink: 0;
+            }
+            #proj-resize-handle:hover,
+            #proj-resize-handle.dragging {
+                background: var(--accent);
+            }
+
+            #main-wrapper {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+                min-width: 0;
             }
 
             /* ========== 文档标题栏 ========== */
@@ -1041,6 +1090,28 @@ enum ScriptwritingLayout {
             #sidebar .char-item .role {
                 font-size: 0.7em;
                 color: var(--text-muted);
+            }
+            #sidebar .sidebar-footer {
+                padding: 8px;
+                border-top: 1px solid var(--border);
+                display: flex;
+                gap: 4px;
+            }
+            #sidebar .sidebar-footer button {
+                flex: 1;
+                padding: 5px 0;
+                font-size: 0.7em;
+                border-radius: 4px;
+                border: 1px solid var(--border);
+                background: var(--bg-tertiary);
+                color: var(--text-secondary);
+                cursor: pointer;
+                transition: all 0.15s;
+            }
+            #sidebar .sidebar-footer button:hover {
+                background: var(--accent-soft);
+                border-color: var(--accent);
+                color: var(--text-primary);
             }
 
             /* ========== 模式切换栏（显示区左上方） ========== */
@@ -1442,6 +1513,17 @@ enum ScriptwritingLayout {
         </style>
     </head>
     <body>
+    <div id="app-layout">
+
+    <div id="project-sidebar">
+        <div class="proj-sidebar-header">
+            <span>📁 项目</span>
+        </div>
+    </div>
+
+    <div id="proj-resize-handle"></div>
+
+    <div id="main-wrapper">
 
     <!-- ===== 文档标题栏 ===== -->
     <div id="doc-titlebar">
@@ -1485,15 +1567,16 @@ enum ScriptwritingLayout {
 
     <!-- ===== 显示区模式切换栏 ===== -->
     <div id="mode-toolbar">
+        <button title="折叠项目侧边栏" id="btn-toggle-project-sidebar">📁</button>
         <span class="mode-label" id="mode-label">📋 时间轴（编辑）</span>
         <span style="flex:1;"></span>
-        <button title="折叠侧边栏" id="btn-toggle-sidebar">📂</button>
+        <button title="折叠角色侧栏" id="btn-toggle-sidebar">📂</button>
     </div>
 
     <!-- ===== Main Body（显示区） ===== -->
     <div id="main-body">
 
-        <!-- ===== Sidebar ===== -->
+        <!-- ===== Sidebar (角色) ===== -->
         <div id="sidebar">
             <div class="sidebar-header">
                 <span>👥 角色</span>
@@ -1502,6 +1585,10 @@ enum ScriptwritingLayout {
             </div>
             <div class="char-list" id="char-list">
                 <!-- 加载 .sws 文件后由 renderTimelineFromSWSBase64 动态渲染 -->
+            </div>
+            <div class="sidebar-footer">
+                <button title="打开角色面板">📋 详情</button>
+                <button title="从剧本提取角色">🔄 提取</button>
             </div>
         </div>
 
@@ -1544,6 +1631,44 @@ enum ScriptwritingLayout {
     </div>
 
     <script>
+        // ===== 项目侧边栏 折叠 =====
+        const projSidebar = document.getElementById('project-sidebar');
+        const btnToggleProj = document.getElementById('btn-toggle-project-sidebar');
+        btnToggleProj.addEventListener('click', () => {
+            projSidebar.classList.toggle('collapsed');
+            btnToggleProj.textContent = projSidebar.classList.contains('collapsed') ? '📂' : '📁';
+        });
+
+        // ===== 项目侧边栏 拖拽调整宽度 =====
+        const projHandle = document.getElementById('proj-resize-handle');
+        let projDragging = false, projStartX, projStartW;
+
+        projHandle.addEventListener('mousedown', (e) => {
+            projDragging = true;
+            projStartX = e.clientX;
+            projStartW = projSidebar.offsetWidth;
+            projHandle.classList.add('dragging');
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!projDragging) return;
+            const dx = e.clientX - projStartX;
+            const newW = Math.max(140, Math.min(380, projStartW + dx));
+            projSidebar.style.width = newW + 'px';
+            projSidebar.style.minWidth = newW + 'px';
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (!projDragging) return;
+            projDragging = false;
+            projHandle.classList.remove('dragging');
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+        });
+
         // ===== Sidebar 折叠 =====
         const sidebar = document.getElementById('sidebar');
         const btnToggle = document.getElementById('btn-toggle-sidebar');
@@ -1802,7 +1927,7 @@ enum ScriptwritingLayout {
             var charList = document.getElementById('char-list');
             if (charList) {
                 var charHTML = '';
-                var defaultAvatars = ['🧔','👨','👩','👨‍🦳','👩‍🦰','👴','🧑','👩‍🦱','👨‍🦱'];
+                var defaultAvatars = ['🧔','👨','👩','👨🦳','👩🦰','👴','🧑','👩🦱','👨🦱'];
                 characters.forEach(function(name, idx) {
                     var avatar = defaultAvatars[idx % defaultAvatars.length];
                     var color = charColors[name] || '#999';
@@ -1991,6 +2116,8 @@ enum ScriptwritingLayout {
         });
 
     </script>
+    </div><!-- /main-wrapper -->
+    </div><!-- /app-layout -->
     </body>
     </html>
     """
