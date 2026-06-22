@@ -1584,9 +1584,24 @@ enum ScriptwritingLayout {
                 cursor: pointer;
                 user-select: none;
                 transition: all 0.15s;
-                border: 1px solid transparent;
+                border: 1.5px solid transparent;
             }
-            .char-chip:hover { filter: brightness(0.9); }
+            .char-chip:hover { filter: brightness(0.95); }
+            .block-wrap[data-chip-selected] {
+                position: relative;
+            }
+            .block-wrap[data-chip-selected]::before {
+                content: '';
+                position: absolute;
+                left: 0; top: 3px; bottom: 3px;
+                width: 3px;
+                background: var(--accent);
+                border-radius: 0 2px 2px 0;
+            }
+            .block-wrap[data-chip-selected] .char-chip {
+                border-color: var(--accent) !important;
+                box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+            }
 
             /* 场景分隔条 */
             .scene-separator {
@@ -2239,28 +2254,114 @@ enum ScriptwritingLayout {
             }
         });
 
-        // Cmd+Enter → 在当前块下方新建块并聚焦
+        // 光标位置辅助：是否在 contenteditable 元素的最开头
+        function isAtStart(el) {
+            var sel = window.getSelection();
+            if (sel.rangeCount === 0) return false;
+            var range = sel.getRangeAt(0);
+            if (!range.collapsed) return false;
+            var preRange = document.createRange();
+            preRange.selectNodeContents(el);
+            preRange.setEnd(range.endContainer, range.endOffset);
+            return preRange.toString().length === 0;
+        }
+
+        // ── Chip 选中态交互 ──
+        // 点击 chip → 选中 / 取消选中
+        document.addEventListener('click', function(e) {
+            var chip = e.target.closest('.char-chip');
+            if (chip) {
+                e.stopPropagation();
+                var wrap = chip.closest('.block-wrap');
+                if (!wrap) return;
+                if (wrap.hasAttribute('data-chip-selected')) {
+                    wrap.removeAttribute('data-chip-selected');
+                } else {
+                    // 取消其他所有选中
+                    document.querySelectorAll('.block-wrap[data-chip-selected]').forEach(function(w) { w.removeAttribute('data-chip-selected'); });
+                    wrap.setAttribute('data-chip-selected', '');
+                }
+                return;
+            }
+            // 点击其他地方 → 取消所有 chip 选中
+            document.querySelectorAll('.block-wrap[data-chip-selected]').forEach(function(w) { w.removeAttribute('data-chip-selected'); });
+        });
+
+        // 键盘事件：chip 选中态 + Cmd+Enter 插入 / Backspace 删除
         document.addEventListener('keydown', function(e) {
-            if (!(e.metaKey && e.key === 'Enter')) return;
+            var send = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.edit;
+
+            // ── Chip 选中态优先（全局，不依赖焦点）──
+            var selectedWrap = document.querySelector('.block-wrap[data-chip-selected]');
+            if (selectedWrap) {
+                var selScene = selectedWrap.dataset.scene;
+                var selIdx = parseInt(selectedWrap.dataset.block);
+
+                if (e.key === 'Enter' && !e.metaKey) {
+                    // Enter → 上方插入空 action，保持 chip 选中
+                    e.preventDefault();
+                    if (send) send.postMessage({ action:'insertBlockBefore', scene:selScene, blockIndex:selIdx });
+                    return;
+                }
+
+                if (e.key === 'Backspace') {
+                    // Backspace → 删除 pair（若为场景最后一块则替换为空 action，由 Swift 端处理）
+                    e.preventDefault();
+                    if (send) send.postMessage({ action:'deletePairAndFocusPrevious', scene:selScene, blockIndex:selIdx });
+                    return;
+                }
+
+                // 其他任意键 → 取消选中，光标进入台词内容
+                e.preventDefault();
+                selectedWrap.removeAttribute('data-chip-selected');
+                var content = selectedWrap.querySelector('.tl-content');
+                if (content) {
+                    content.focus();
+                    var r = document.createRange();
+                    r.selectNodeContents(content); r.collapse(false);
+                    var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+                }
+                return;
+            }
+
+            // ── 普通编辑键盘 ──
             var el = document.activeElement;
             if (!el || !el.classList.contains('tl-content')) return;
             var wrap = el.closest('.block-wrap');
             if (!wrap) return;
-            e.preventDefault();
-            e.stopPropagation();
-            
-            // 先触发 focusout 保存当前编辑
-            el.blur();
-            
             var sceneNum = wrap.dataset.scene;
             var blockIdx = parseInt(wrap.dataset.block);
-            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.edit) {
-                window.webkit.messageHandlers.edit.postMessage({
-                    action: 'insertBlock',
-                    scene: sceneNum,
-                    afterBlock: blockIdx,
-                    type: 'action'
-                });
+            var type = wrap.dataset.type;
+
+            // Cmd+Enter → 在当前块下方插入空 action 并聚焦
+            if (e.metaKey && e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                el.blur();
+                if (send) send.postMessage({ action:'insertBlock', scene:sceneNum, afterBlock:blockIdx, type:'action' });
+                return;
+            }
+
+            // Backspace at start of line
+            if (e.key === 'Backspace' && isAtStart(el)) {
+                // 有内容可退格（空行、文本等）→ 浏览器原生处理，逐字/逐行删除
+                var blkText = (el.innerText || '').trim();
+                if (blkText.length > 0) { return; }
+
+                // 内容为空：场景内唯一一行 → 不删（底线守卫）
+                var allWraps = document.querySelectorAll('.block-wrap[data-scene="' + sceneNum + '"]');
+                if (allWraps.length <= 1) {
+                    e.preventDefault();
+                    return;
+                }
+
+                // 内容为空 + 非最后一块：dialogue 不删 pair（只在 chip 选中态删），action 直接删 block
+                e.preventDefault();
+                el.blur();
+                if (type !== 'dialogue') {
+                    if (send) send.postMessage({ action:'deleteBlock', scene:sceneNum, blockIndex:blockIdx });
+                }
+                return;
             }
         });
 
@@ -2284,6 +2385,14 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
             handleUpdateBlock(body)
         case "insertBlock":
             handleInsertBlock(body)
+        case "deleteBlock":
+            handleDeleteBlock(body)
+        case "deleteAndReplaceWithAction":
+            handleDeleteAndReplaceWithAction(body)
+        case "insertBlockBefore":
+            handleInsertBlockBefore(body)
+        case "deletePairAndFocusPrevious":
+            handleDeletePairAndFocusPrevious(body)
         default:
             break
         }
@@ -2370,6 +2479,127 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             self?.focusBlock(scene: sceneNum, blockIndex: insertIdx)
         }
+    }
+
+    private func handleDeleteBlock(_ body: [String: Any]) {
+        guard let sceneNum = body["scene"] as? String,
+              let blockIdx = body["blockIndex"] as? Int,
+              let doc = currentDocument else { return }
+
+        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
+        var scene = doc.scenes[sceneIdx]
+        guard blockIdx < scene.blocks.count else { return }
+
+        // 场景内最后一个块：不删
+        guard scene.blocks.count > 1 else { return }
+
+        var blocks = scene.blocks
+        blocks.remove(at: blockIdx)
+
+        scene = SWSScene(heading: scene.heading, blocks: blocks)
+        var scenes = doc.scenes
+        scenes[sceneIdx] = scene
+        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
+
+        renderCurrentDocument()
+        // Focus the previous block (or new-first if head deleted)
+        let focusIdx = max(0, blockIdx - 1)
+        if focusIdx >= 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.focusBlock(scene: sceneNum, blockIndex: focusIdx)
+            }
+        }
+    }
+
+    private func handleDeleteAndReplaceWithAction(_ body: [String: Any]) {
+        guard let sceneNum = body["scene"] as? String,
+              let blockIdx = body["blockIndex"] as? Int,
+              let doc = currentDocument else { return }
+
+        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
+        var scene = doc.scenes[sceneIdx]
+        guard blockIdx < scene.blocks.count else { return }
+
+        var blocks = scene.blocks
+        blocks[blockIdx] = .action(SWSActionBlock(text: ""))
+
+        scene = SWSScene(heading: scene.heading, blocks: blocks)
+        var scenes = doc.scenes
+        scenes[sceneIdx] = scene
+        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
+
+        renderCurrentDocument()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.focusBlock(scene: sceneNum, blockIndex: blockIdx)
+        }
+    }
+
+    private func handleInsertBlockBefore(_ body: [String: Any]) {
+        guard let sceneNum = body["scene"] as? String,
+              let blockIdx = body["blockIndex"] as? Int,
+              let doc = currentDocument else { return }
+
+        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
+        var scene = doc.scenes[sceneIdx]
+        guard blockIdx < scene.blocks.count else { return }
+
+        var blocks = scene.blocks
+        // Insert empty action BEFORE the dialogue (at blockIdx, pushes dialogue down)
+        blocks.insert(.action(SWSActionBlock(text: "")), at: blockIdx)
+
+        scene = SWSScene(heading: scene.heading, blocks: blocks)
+        var scenes = doc.scenes
+        scenes[sceneIdx] = scene
+        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
+
+        renderCurrentDocument()
+        // Dialogue shifted to blockIdx+1, re-select chip to stay in selected state
+        let newDialogueIdx = blockIdx + 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.focusBlockChipSelected(scene: sceneNum, blockIndex: newDialogueIdx)
+        }
+    }
+
+    private func handleDeletePairAndFocusPrevious(_ body: [String: Any]) {
+        guard let sceneNum = body["scene"] as? String,
+              let blockIdx = body["blockIndex"] as? Int,
+              let doc = currentDocument else { return }
+
+        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
+        var scene = doc.scenes[sceneIdx]
+        guard blockIdx < scene.blocks.count else { return }
+
+        var blocks = scene.blocks
+        let wasOnlyBlock = blocks.count <= 1
+        if wasOnlyBlock {
+            // 场景最后一个块是 pair → 替换为空 action，保留光标落点
+            blocks[blockIdx] = .action(SWSActionBlock(text: ""))
+        } else {
+            blocks.remove(at: blockIdx)
+        }
+
+        scene = SWSScene(heading: scene.heading, blocks: blocks)
+        var scenes = doc.scenes
+        scenes[sceneIdx] = scene
+        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
+
+        renderCurrentDocument()
+        // 替换为 action 则聚焦同一位置，删除则聚焦上一行
+        let focusIdx = wasOnlyBlock ? blockIdx : max(0, blockIdx - 1)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.focusBlock(scene: sceneNum, blockIndex: focusIdx)
+        }
+    }
+
+    private func focusBlockChipSelected(scene: String, blockIndex: Int) {
+        guard let webView = scriptwritingWebView else { return }
+        let js = """
+        (function(){
+            var w=document.querySelector('.block-wrap[data-scene=\"\(scene)\"][data-block=\"\(blockIndex)\"]');
+            if(w){w.setAttribute('data-chip-selected','');}
+        })();
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
     private func focusBlock(scene: String, blockIndex: Int) {
