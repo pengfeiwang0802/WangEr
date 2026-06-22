@@ -1547,27 +1547,31 @@ enum ScriptwritingLayout {
             .scene-field.loc-field { color: #a0a0b0; min-width: 80px; }
             .scene-field.time-field { color: #6a9fc5; min-width: 50px; }
 
-            .tl-textarea {
+            /* 文本编辑区（contenteditable，原地编辑，无切换） */
+            .tl-content {
                 flex: 1;
-                border: 1px solid transparent;
-                background: transparent;
                 font-size: 0.88em;
                 line-height: 1.5;
                 font-family: inherit;
                 color: inherit;
                 outline: none;
-                resize: none;
-                overflow: hidden;
                 border-radius: 4px;
                 padding: 2px 6px;
-                min-height: 1.4em;
-                transition: all 0.15s;
-                field-sizing: content;
+                min-height: 1.5em;
+                cursor: text;
             }
-            .tl-textarea:hover { border-color: var(--border); background: var(--bg-primary); }
-            .tl-textarea:focus { border-color: var(--accent); background: var(--bg-primary); box-shadow: 0 0 0 2px var(--accent-soft); }
-            .tl-textarea.action-textarea { color: #5a8a5a; }
-            .tl-textarea.dialogue-textarea { color: var(--text-primary); }
+            /* block-wrap：聚焦竖线（与插入条同位置） */
+            .block-wrap {
+                border-left: 3px solid transparent;
+                transition: border-color 0.15s;
+                margin-bottom: 1px;
+            }
+            .block-wrap:focus-within {
+                border-left-color: var(--accent);
+            }
+            .block-wrap[data-type="action"] .tl-content { color: #5a8a5a; }
+            .block-wrap[data-type="dialogue"] .tl-content { color: var(--text-primary); }
+            .block-wrap[data-type="unattributed"] .tl-content { color: #888; font-style: italic; }
 
             .char-chip {
                 display: inline-flex;
@@ -2086,12 +2090,14 @@ enum ScriptwritingLayout {
                     var blkIdx = 0;
                     (sc.blocks || []).forEach(function(blk) {
                         if (blk.type === 'action') {
+                            cardHTML += '<div class="block-wrap" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-type="action">';
                             cardHTML += '<div class="tl-block tl-action"><span class="tl-block-icon">📝</span>';
-                            cardHTML += '<textarea class="tl-textarea action-textarea" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-type="action" rows="1">' + escHTML(blk.text || '') + '</textarea>';
-                            cardHTML += '</div>';
+                            cardHTML += '<div class="tl-content" contenteditable="true">' + escHTML(blk.text || '') + '</div>';
+                            cardHTML += '</div></div>';
                             blkIdx++;
                         } else if (blk.type === 'dialogue') {
                             var charColor = charColors[blk.character] || '#999';
+                            cardHTML += '<div class="block-wrap" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-type="dialogue">';
                             cardHTML += '<div class="tl-block tl-dialogue">';
                             cardHTML += '<span class="tl-block-icon">👤</span>';
                             cardHTML += '<span class="char-chip" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-character="' + escHTML(blk.character || '') + '" style="background:' + charColor + '18;color:' + charColor + ';">' + escHTML(blk.character || '') + '</span>';
@@ -2099,14 +2105,15 @@ enum ScriptwritingLayout {
                             cardHTML += '</div>';
                             cardHTML += '<div class="tl-block tl-dialogue-text">';
                             cardHTML += '<span class="tl-block-icon">💬</span>';
-                            cardHTML += '<textarea class="tl-textarea dialogue-textarea" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-type="dialogue" rows="1">' + escHTML(blk.line || '') + '</textarea>';
-                            cardHTML += '</div>';
+                            cardHTML += '<div class="tl-content" contenteditable="true">' + escHTML(blk.line || '') + '</div>';
+                            cardHTML += '</div></div>';
                             blkIdx++;
                         } else if (blk.type === 'unattributed') {
                             (blk.lines || []).forEach(function(l) {
+                                cardHTML += '<div class="block-wrap" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-type="unattributed">';
                                 cardHTML += '<div class="tl-block tl-action" style="color:#888;font-style:italic;"><span class="tl-block-icon">💬</span>';
-                                cardHTML += '<textarea class="tl-textarea action-textarea" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-type="unattributed" rows="1">' + escHTML(l) + '</textarea>';
-                                cardHTML += '</div>';
+                                cardHTML += '<div class="tl-content" contenteditable="true">' + escHTML(l) + '</div>';
+                                cardHTML += '</div></div>';
                                 blkIdx++;
                             });
                         }
@@ -2191,13 +2198,6 @@ enum ScriptwritingLayout {
         }
 
         // ===== 可编辑元素事件处理 =====
-        // Auto-grow textareas
-        document.addEventListener('input', function(e) {
-            var ta = e.target.closest('.tl-textarea');
-            if (!ta) return;
-            ta.style.height = 'auto';
-            ta.style.height = (ta.scrollHeight) + 'px';
-        });
 
         // Focusout → push edit to Swift
         document.addEventListener('focusout', function(e) {
@@ -2214,11 +2214,13 @@ enum ScriptwritingLayout {
                     field: field,
                     value: value
                 };
-            } else if (el.classList.contains('tl-textarea')) {
-                var sceneNum = el.dataset.scene;
-                var blockIdx = parseInt(el.dataset.block);
-                var type = el.dataset.type;
-                var value = el.value;
+            } else if (el.classList.contains('tl-content')) {
+                var wrap = el.closest('.block-wrap');
+                if (!wrap) return;
+                var sceneNum = wrap.dataset.scene;
+                var blockIdx = parseInt(wrap.dataset.block);
+                var type = wrap.dataset.type;
+                var value = el.innerText;
                 patch = {
                     action: 'updateBlock',
                     scene: sceneNum,
@@ -2237,19 +2239,30 @@ enum ScriptwritingLayout {
             }
         });
 
-        // Initialize auto-grow on all existing textareas
-        function initTextareaHeights() {
-            document.querySelectorAll('.tl-textarea').forEach(function(ta) {
-                ta.style.height = 'auto';
-                ta.style.height = (ta.scrollHeight) + 'px';
-            });
-        }
-        // Call after each render
-        var _origRenderTimeline = window.renderTimelineFromSWSBase64;
-        window.renderTimelineFromSWSBase64 = function(b64) {
-            _origRenderTimeline(b64);
-            setTimeout(initTextareaHeights, 50);
-        };
+        // Cmd+Enter → 在当前块下方新建块并聚焦
+        document.addEventListener('keydown', function(e) {
+            if (!(e.metaKey && e.key === 'Enter')) return;
+            var el = document.activeElement;
+            if (!el || !el.classList.contains('tl-content')) return;
+            var wrap = el.closest('.block-wrap');
+            if (!wrap) return;
+            e.preventDefault();
+            e.stopPropagation();
+            
+            // 先触发 focusout 保存当前编辑
+            el.blur();
+            
+            var sceneNum = wrap.dataset.scene;
+            var blockIdx = parseInt(wrap.dataset.block);
+            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.edit) {
+                window.webkit.messageHandlers.edit.postMessage({
+                    action: 'insertBlock',
+                    scene: sceneNum,
+                    afterBlock: blockIdx,
+                    type: 'action'
+                });
+            }
+        });
 
     </script>
     </body>
@@ -2269,6 +2282,8 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
             handleUpdateHeading(body)
         case "updateBlock":
             handleUpdateBlock(body)
+        case "insertBlock":
+            handleInsertBlock(body)
         default:
             break
         }
@@ -2331,6 +2346,41 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
         var scenes = doc.scenes
         scenes[sceneIdx] = scene
         currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
+    }
+
+    private func handleInsertBlock(_ body: [String: Any]) {
+        guard let sceneNum = body["scene"] as? String,
+              let afterBlock = body["afterBlock"] as? Int,
+              let doc = currentDocument else { return }
+
+        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
+        var scene = doc.scenes[sceneIdx]
+
+        var blocks = scene.blocks
+        let insertIdx = min(afterBlock + 1, blocks.count)
+        blocks.insert(.action(SWSActionBlock(text: "")), at: insertIdx)
+
+        scene = SWSScene(heading: scene.heading, blocks: blocks)
+        var scenes = doc.scenes
+        scenes[sceneIdx] = scene
+        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
+
+        // Re-render timeline, then focus new block
+        renderCurrentDocument()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.focusBlock(scene: sceneNum, blockIndex: insertIdx)
+        }
+    }
+
+    private func focusBlock(scene: String, blockIndex: Int) {
+        guard let webView = scriptwritingWebView else { return }
+        let js = """
+        (function(){
+            var w=document.querySelector('.block-wrap[data-scene=\"\(scene)\"][data-block=\"\(blockIndex)\"]');
+            if(w){var c=w.querySelector('.tl-content');if(c){c.focus();var r=document.createRange();r.selectNodeContents(c);r.collapse(false);var s=window.getSelection();s.removeAllRanges();s.addRange(r);}}
+        })();
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
     private func setDirtyFlag(_ dirty: Bool) {
