@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+import UniformTypeIdentifiers
 import SWS
 
 // MARK: - Plugin 协议（草案阶段，最小接口）
@@ -90,6 +91,8 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
     private weak var scriptwritingWebView: WKWebView?
     /// 模板管理窗口关闭观察者
     private var templateManagerCloseObserver: NSObjectProtocol?
+    /// 项目文件管理器（.swsproj）
+    private let projectManager = SWSProjectManager()
 
     func createWindow() -> NSWindow {
         let window = NSWindow(
@@ -120,8 +123,9 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
         // 先加载默认空布局
         webView.navigationDelegate = self
-        // 注册 JS → Swift 消息通道（编辑同步）
+        // 注册 JS → Swift 消息通道
         webView.configuration.userContentController.add(self, name: "edit")
+        webView.configuration.userContentController.add(self, name: "swsproj")
         webView.loadHTMLString(ScriptwritingLayout.html, baseURL: nil)
 
         // 工具栏（文件操作按钮）
@@ -417,6 +421,108 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
+    // MARK: - 项目文件管理（.swsproj）
+
+    @objc func newSWSProject(_ sender: Any?) {
+        let panel = NSSavePanel()
+        panel.title = "新建编剧项目"
+        panel.nameFieldStringValue = "未命名.swsproj"
+        panel.prompt = "创建"
+        panel.allowedContentTypes = [UTType(filenameExtension: "swsproj") ?? .json]
+
+        guard let window = findPluginWindow() else { return }
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            let title = url.deletingPathExtension().lastPathComponent
+            do {
+                try self.projectManager.createProject(at: url, title: title)
+                self.pushProjectToWebView()
+                self.updateWindowTitleForProject()
+            } catch {
+                self.showAlert("无法创建项目：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    @objc func openSWSProject(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.title = "打开编剧项目"
+        panel.allowedContentTypes = [UTType(filenameExtension: "swsproj") ?? .json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+
+        guard let window = findPluginWindow() else { return }
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            do {
+                try self.projectManager.loadProject(from: url)
+                self.pushProjectToWebView()
+                self.updateWindowTitleForProject()
+            } catch {
+                self.showAlert("无法打开项目：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    @objc func saveSWSProject(_ sender: Any?) {
+        guard projectManager.isProjectOpen else { return }
+        if projectManager.fileURL != nil {
+            do {
+                try projectManager.save()
+            } catch {
+                showAlert("保存失败：\(error.localizedDescription)")
+            }
+        } else {
+            saveSWSProjectAs()
+        }
+    }
+
+    private func saveSWSProjectAs() {
+        guard projectManager.isProjectOpen else { return }
+        let panel = NSSavePanel()
+        panel.title = "另存为 .swsproj"
+        panel.nameFieldStringValue = projectManager.fileName
+        panel.prompt = "保存"
+        panel.allowedContentTypes = [UTType(filenameExtension: "swsproj") ?? .json]
+
+        guard let window = findPluginWindow() else { return }
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            do {
+                try self.projectManager.saveAs(to: url)
+            } catch {
+                self.showAlert("保存失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: - 推送项目到 WebView
+
+    private func pushProjectToWebView() {
+        guard let proj = projectManager.project, let webView = scriptwritingWebView else { return }
+        let json = encodeProjectToJSON(proj)
+        let js = "if(typeof window.loadProjectData==='function')window.loadProjectData(\(json));"
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    private func updateWindowTitleForProject() {
+        guard let window = findPluginWindow() else { return }
+        let title = projectManager.projectTitle
+        window.title = "✍️ \(title)"
+    }
+
+    private func showAlert(_ message: String) {
+        DispatchQueue.main.async {
+            guard let window = self.findPluginWindow() else { return }
+            let alert = NSAlert()
+            alert.messageText = "编剧助手"
+            alert.informativeText = message
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "确定")
+            alert.beginSheetModal(for: window)
+        }
+    }
+
     // MARK: - 窗口/WebView 查找辅助
 
     private func findPluginWindow() -> NSWindow? {
@@ -572,7 +678,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
 extension ScriptwritingPlugin: NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .openFile, .saveFile, .saveAsFile, .toggleLayout]
+        [.newProject, .openProject, .openFile, .saveFile, .saveProject, .saveAsFile, .flexibleSpace, .toggleLayout]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -581,6 +687,33 @@ extension ScriptwritingPlugin: NSToolbarDelegate {
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         switch itemIdentifier {
+        case .newProject:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "新建项目"
+            item.paletteLabel = "新建项目"
+            item.toolTip = "新建 .swsproj 编剧项目"
+            item.image = NSImage(systemSymbolName: "doc.badge.plus", accessibilityDescription: "新建项目")
+            item.target = self
+            item.action = #selector(newSWSProject(_:))
+            return item
+        case .openProject:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "打开项目"
+            item.paletteLabel = "打开 .swsproj"
+            item.toolTip = "打开 .swsproj 编剧项目"
+            item.image = NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: "打开项目")
+            item.target = self
+            item.action = #selector(openSWSProject(_:))
+            return item
+        case .saveProject:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "保存项目"
+            item.paletteLabel = "保存 .swsproj"
+            item.toolTip = "保存项目到 .swsproj 文件"
+            item.image = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "保存项目")
+            item.target = self
+            item.action = #selector(saveSWSProject(_:))
+            return item
         case .openFile:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "打开"
@@ -630,6 +763,9 @@ extension ScriptwritingPlugin: NSToolbarDelegate {
 }
 
 private extension NSToolbarItem.Identifier {
+    static let newProject = NSToolbarItem.Identifier("com.wanger.newProject")
+    static let openProject = NSToolbarItem.Identifier("com.wanger.openProject")
+    static let saveProject = NSToolbarItem.Identifier("com.wanger.saveProject")
     static let openFile = NSToolbarItem.Identifier("com.wanger.openSWS")
     static let toggleLayout = NSToolbarItem.Identifier("com.wanger.toggleLayout")
     static let saveFile = NSToolbarItem.Identifier("com.wanger.saveSWS")
@@ -713,6 +849,52 @@ enum ScriptwritingLayout {
             #proj-resize-handle:hover,
             #proj-resize-handle.dragging {
                 background: var(--accent);
+            }
+
+            /* 项目树 */
+            .proj-tree {
+                list-style: none;
+                padding: 4px 0;
+                margin: 0;
+                overflow-y: auto;
+                flex: 1;
+            }
+            .proj-tree-item {
+                user-select: none;
+            }
+            .proj-tree-row {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                padding: 4px 12px;
+                cursor: pointer;
+                font-size: 0.82em;
+                color: var(--text-secondary);
+                border-radius: 4px;
+                margin: 0 4px;
+                transition: all 0.12s;
+            }
+            .proj-tree-row:hover {
+                background: var(--bg-tertiary);
+            }
+            .proj-tree-row.active {
+                background: var(--accent-soft);
+                color: var(--text-primary);
+                font-weight: 600;
+            }
+            .proj-tree-icon {
+                flex-shrink: 0;
+                font-size: 0.9em;
+            }
+            .proj-tree-name {
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            .proj-tree-children {
+                list-style: none;
+                padding-left: 12px;
+                margin: 0;
             }
 
             #main-wrapper {
@@ -1686,6 +1868,80 @@ enum ScriptwritingLayout {
             document.body.style.userSelect = '';
         });
 
+        // ===== 项目侧边栏：加载 & 渲染项目树 =====
+        window.loadProjectData = function(jsonStr) {
+            var data = typeof jsonStr === 'string' ? JSON.parse(jsonStr) : jsonStr;
+            var sidebar = document.getElementById('project-sidebar');
+            if (!sidebar || !data.tree) return;
+
+            var oldList = sidebar.querySelector('.proj-tree');
+            if (oldList) oldList.remove();
+
+            var header = sidebar.querySelector('.proj-sidebar-header');
+            if (header) {
+                header.innerHTML = '<span>📁 ' + escapeHtml(data.title || '未命名') + '</span>';
+            }
+
+            var ul = document.createElement('ul');
+            ul.className = 'proj-tree';
+            data.tree.forEach(function(node) {
+                ul.appendChild(buildTreeNode(node));
+            });
+            sidebar.appendChild(ul);
+
+            if (sidebar.classList.contains('collapsed')) {
+                sidebar.classList.remove('collapsed');
+                var btn = document.getElementById('btn-toggle-project-sidebar');
+                if (btn) btn.textContent = '📁';
+            }
+
+            window._projectData = data;
+        };
+
+        function buildTreeNode(node) {
+            var li = document.createElement('li');
+            li.className = 'proj-tree-item';
+            li.dataset.nodeId = node.id;
+            li.dataset.nodeType = node.type;
+            if (node.ref) li.dataset.nodeRef = node.ref;
+
+            var row = document.createElement('div');
+            row.className = 'proj-tree-row';
+            row.innerHTML = '<span class="proj-tree-icon">' + (node.icon || '📄') + '</span><span class="proj-tree-name">' + escapeHtml(node.name) + '</span>';
+
+            row.addEventListener('click', function(e) {
+                e.stopPropagation();
+                document.querySelectorAll('.proj-tree-row.active').forEach(function(r) { r.classList.remove('active'); });
+                row.classList.add('active');
+                window.webkit.messageHandlers.swsproj.postMessage({
+                    action: 'selectNode',
+                    nodeId: node.id,
+                    nodeType: node.type,
+                    nodeRef: node.ref || null
+                });
+            });
+
+            li.appendChild(row);
+
+            if (node.children && node.children.length > 0) {
+                var childUl = document.createElement('ul');
+                childUl.className = 'proj-tree-children';
+                if (node.defaultOpen === false) childUl.style.display = 'none';
+                node.children.forEach(function(child) {
+                    childUl.appendChild(buildTreeNode(child));
+                });
+                li.appendChild(childUl);
+            }
+
+            return li;
+        }
+
+        function escapeHtml(str) {
+            var div = document.createElement('div');
+            div.appendChild(document.createTextNode(str));
+            return div.innerHTML;
+        }
+
         // ===== Sidebar 折叠 =====
         const sidebar = document.getElementById('sidebar');
         const btnToggle = document.getElementById('btn-toggle-sidebar');
@@ -2143,29 +2399,56 @@ enum ScriptwritingLayout {
 // MARK: - WKScriptMessageHandler (编辑同步)
 extension ScriptwritingPlugin: WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "edit",
-              let body = message.body as? [String: Any],
+        guard let body = message.body as? [String: Any],
               let action = body["action"] as? String else { return }
 
-        switch action {
-        case "updateHeading":
-            handleUpdateHeading(body)
-        case "updateBlock":
-            handleUpdateBlock(body)
-        case "insertBlock":
-            handleInsertBlock(body)
-        case "deleteBlock":
-            handleDeleteBlock(body)
-        case "insertBlockBefore":
-            handleInsertBlockBefore(body)
-        case "deletePairAndFocusPrevious":
-            handleDeletePairAndFocusPrevious(body)
-        default:
-            break
+        if message.name == "edit" {
+            handleEditAction(action, body: body)
+        } else if message.name == "swsproj" {
+            handleProjectAction(action, body: body)
         }
+    }
 
-        // 设置脏标记
+    private func handleEditAction(_ action: String, body: [String: Any]) {
+        switch action {
+        case "updateHeading": handleUpdateHeading(body)
+        case "updateBlock": handleUpdateBlock(body)
+        case "insertBlock": handleInsertBlock(body)
+        case "deleteBlock": handleDeleteBlock(body)
+        case "insertBlockBefore": handleInsertBlockBefore(body)
+        case "deletePairAndFocusPrevious": handleDeletePairAndFocusPrevious(body)
+        default: break
+        }
         setDirtyFlag(true)
+    }
+
+    private func handleProjectAction(_ action: String, body: [String: Any]) {
+        let mgr = projectManager
+        switch action {
+        case "markDirty": mgr.markDirty()
+        case "updateOutline":
+            if let md = body["content"] as? String { mgr.updateOutline(md) }
+        case "updateScript":
+            if let text = body["content"] as? String { mgr.updateScript(text) }
+        case "updateCharacter":
+            if let id = body["id"] as? String {
+                mgr.updateCharacter(id: id, name: body["name"] as? String, tagline: body["tagline"] as? String, bio: body["bio"] as? String, avatar: body["avatar"] as? String)
+            }
+        case "updateScene":
+            if let id = body["id"] as? String {
+                mgr.updateScene(id: id, title: body["title"] as? String, content: body["content"] as? String, location: body["location"] as? String, time: body["time"] as? String)
+            }
+        case "addCharacter":
+            if let name = body["name"] as? String {
+                mgr.addCharacter(name: name, avatar: body["avatar"] as? String, tagline: body["tagline"] as? String, bio: body["bio"] as? String)
+            }
+        case "addScene":
+            if let title = body["title"] as? String {
+                mgr.addScene(title: title, location: body["location"] as? String, time: body["time"] as? String, content: body["content"] as? String)
+            }
+        case "requestSync": pushProjectToWebView()
+        default: break
+        }
     }
 
     private func handleUpdateHeading(_ body: [String: Any]) {
@@ -2355,6 +2638,51 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
         })();
         """
         webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    /// 将 SWSProject 编码为 JSON 字符串（供 JS 侧 loadProjectData 消费）
+    private func encodeProjectToJSON(_ project: SWSProject) -> String {
+        var dict: [String: Any] = [
+            "title": project.meta.title,
+            "author": project.meta.author,
+            "tree": project.resolvedTree.map { encodeTreeNode($0) },
+        ]
+        if let outline = project.outline { dict["outline"] = outline }
+        if let script = project.script { dict["script"] = script }
+        // 展开 characters 和 scenes 供 JS 直接使用
+        dict["characters"] = project.characters.map { char in
+            var c: [String: Any] = ["id": char.id, "name": char.name]
+            if let tagline = char.tagline { c["tagline"] = tagline }
+            if let bio = char.bio { c["bio"] = bio }
+            if let avatar = char.avatar { c["avatar"] = avatar }
+            if let color = char.color { c["color"] = color }
+            return c
+        }
+        dict["scenes"] = project.scenes.map { scene in
+            var s: [String: Any] = ["id": scene.id, "title": scene.title]
+            if let location = scene.location { s["location"] = location }
+            if let time = scene.time { s["time"] = time }
+            if let content = scene.content { s["content"] = content }
+            return s
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
+              let json = String(data: data, encoding: .utf8) else { return "{}" }
+        return json
+    }
+
+    private func encodeTreeNode(_ node: SWSProjectTreeNode) -> [String: Any] {
+        var d: [String: Any] = [
+            "id": node.id,
+            "name": node.name,
+            "type": node.type.rawValue,
+            "icon": node.type.icon,
+        ]
+        if let ref = node.ref { d["ref"] = ref }
+        if let defaultOpen = node.defaultOpen { d["defaultOpen"] = defaultOpen }
+        if let children = node.children, !children.isEmpty {
+            d["children"] = children.map { encodeTreeNode($0) }
+        }
+        return d
     }
 
     private func setDirtyFlag(_ dirty: Bool) {
