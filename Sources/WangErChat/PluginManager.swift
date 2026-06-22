@@ -101,6 +101,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
             backing: .buffered,
             defer: false
         )
+        window.identifier = NSUserInterfaceItemIdentifier("scriptwriting")
         window.title = "✍️ 编剧助手"
         window.minSize = NSSize(width: 780, height: 500)
         window.center()
@@ -171,10 +172,9 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
             // 持久化：记住最后打开的文件，下次打开编辑器自动恢复
             UserDefaults.standard.set(url.path, forKey: ScriptwritingPlugin.lastSWSFileKey)
 
-            // 更新窗口标题
-            if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "scriptwriting" }) ??
-                NSApp.windows.first(where: { $0.title.hasPrefix("✍️") }) {
-                window.title = "✍️ \(url.lastPathComponent)"
+            // 窗口标题始终是编剧助手
+            if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "scriptwriting" }) {
+                window.title = "✍️ 编剧助手"
             }
 
             renderCurrentDocument()
@@ -437,7 +437,6 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
             do {
                 try self.projectManager.createProject(at: url, title: title)
                 self.pushProjectToWebView()
-                self.updateWindowTitleForProject()
             } catch {
                 self.showAlert("无法创建项目：\(error.localizedDescription)")
             }
@@ -457,7 +456,6 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
             do {
                 try self.projectManager.loadProject(from: url)
                 self.pushProjectToWebView()
-                self.updateWindowTitleForProject()
             } catch {
                 self.showAlert("无法打开项目：\(error.localizedDescription)")
             }
@@ -505,12 +503,6 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
-    private func updateWindowTitleForProject() {
-        guard let window = findPluginWindow() else { return }
-        let title = projectManager.projectTitle
-        window.title = "✍️ \(title)"
-    }
-
     private func showAlert(_ message: String) {
         DispatchQueue.main.async {
             guard let window = self.findPluginWindow() else { return }
@@ -526,9 +518,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
     // MARK: - 窗口/WebView 查找辅助
 
     private func findPluginWindow() -> NSWindow? {
-        return NSApp.windows.first(where: {
-            $0.title.contains("编剧助手") || $0.title.hasSuffix(".sws")
-        })
+        return NSApp.windows.first(where: { $0.identifier?.rawValue == "scriptwriting" })
     }
 
     private func findWebView(in window: NSWindow) -> WKWebView? {
@@ -1169,6 +1159,116 @@ enum ScriptwritingLayout {
                 color: var(--gold);
                 background: rgba(245,166,35,0.1);
             }
+
+            /* ========== 角色添加 Modal ========== */
+            .modal-backdrop {
+                position: fixed;
+                inset: 0;
+                background: rgba(0,0,0,0.45);
+                z-index: 1000;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                opacity: 0;
+                pointer-events: none;
+                transition: opacity 0.2s;
+            }
+            .modal-backdrop.open {
+                opacity: 1;
+                pointer-events: auto;
+            }
+            .modal-card {
+                background: var(--bg-primary);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 24px;
+                width: 360px;
+                max-width: 90vw;
+                box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+                transform: translateY(12px);
+                transition: transform 0.2s;
+            }
+            .modal-backdrop.open .modal-card {
+                transform: translateY(0);
+            }
+            .modal-card h3 {
+                margin: 0 0 16px;
+                font-size: 0.95em;
+                font-weight: 700;
+                color: var(--text-primary);
+            }
+            .modal-card .field {
+                margin-bottom: 12px;
+            }
+            .modal-card .field label {
+                display: block;
+                font-size: 0.72em;
+                font-weight: 600;
+                color: var(--text-muted);
+                margin-bottom: 4px;
+                text-transform: uppercase;
+                letter-spacing: 0.8px;
+            }
+            .modal-card .field input,
+            .modal-card .field textarea {
+                width: 100%;
+                padding: 8px 10px;
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                font-size: 0.88em;
+                font-family: inherit;
+                background: var(--bg-secondary);
+                color: var(--text-primary);
+                outline: none;
+                transition: border-color 0.15s;
+            }
+            .modal-card .field input:focus,
+            .modal-card .field textarea:focus {
+                border-color: var(--accent);
+                box-shadow: 0 0 0 3px var(--accent-soft);
+            }
+            .modal-card .field textarea {
+                resize: vertical;
+                min-height: 60px;
+            }
+            .modal-card .modal-actions {
+                display: flex;
+                justify-content: flex-end;
+                gap: 8px;
+                margin-top: 8px;
+            }
+            .modal-card .modal-actions button {
+                padding: 7px 18px;
+                border-radius: 6px;
+                font-size: 0.82em;
+                font-family: inherit;
+                cursor: pointer;
+                border: 1px solid var(--border);
+                transition: all 0.15s;
+            }
+            .modal-card .modal-actions .btn-cancel {
+                background: transparent;
+                color: var(--text-muted);
+            }
+            .modal-card .modal-actions .btn-cancel:hover {
+                background: var(--bg-tertiary);
+                color: var(--text-primary);
+            }
+            .modal-card .modal-actions .btn-add {
+                background: var(--accent);
+                color: #fff;
+                border-color: var(--accent);
+                font-weight: 600;
+            }
+            .modal-card .modal-actions .btn-add:hover {
+                filter: brightness(1.1);
+            }
+            .modal-card .modal-actions .btn-add:disabled {
+                opacity: 0.4;
+                cursor: not-allowed;
+                filter: none;
+            }
+
             #sidebar .char-list {
                 flex: 1;
                 overflow-y: auto;
@@ -1896,6 +1996,10 @@ enum ScriptwritingLayout {
             }
 
             window._projectData = data;
+            // 项目数据更新后刷新角色侧栏
+            if (typeof window.renderCharacterSidebar === 'function') {
+                window.renderCharacterSidebar();
+            }
         };
 
         function buildTreeNode(node) {
@@ -2196,40 +2300,121 @@ enum ScriptwritingLayout {
                 });
             }
 
-            // ── 渲染角色列表 ──
+            // ── 渲染角色侧栏 ──
+            window.renderCharacterSidebar();
+
+            // 更新剧情轴 hint
+            var hintEl = document.querySelector('.storybar-header .hint');
+            if (hintEl) hintEl.textContent = scenes.length + ' 场';
+
+            console.log('[Timeline] 已渲染 ' + scenes.length + ' 场');
+        };
+
+        // ===== 角色侧栏渲染（独立函数，可从多处调用） =====
+        window.renderCharacterSidebar = function() {
             var charList = document.getElementById('char-list');
-            if (charList) {
-                var charHTML = '';
-                var defaultAvatars = ['🧔','👨','👩','👨🦳','👩🦰','👴','🧑','👩🦱','👨🦱'];
-                characters.forEach(function(name, idx) {
-                    var avatar = defaultAvatars[idx % defaultAvatars.length];
-                    var color = charColors[name] || '#999';
-                    var id = 'char-sid-' + name.replace(/[^a-zA-Z0-9\\u4e00-\\u9fff]/g, '');
-                    charHTML += '<div class="char-item' + (idx === 0 ? ' active' : '') + '" data-char="' + id + '">';
-                    charHTML += '<div class="avatar" style="background:' + color + '22;color:' + color + ';">' + avatar + '</div>';
-                    charHTML += '<div class="info"><div class="name">' + escHTML(name) + '</div><div class="role">角色</div></div>';
-                    charHTML += '</div>';
-                });
-                charList.innerHTML = charHTML;
-                // rebind character selection
-                charList.addEventListener('click', function(e) {
-                    var item = e.target.closest('.char-item');
-                    if (!item) return;
-                    charList.querySelectorAll('.char-item').forEach(function(el) { el.classList.remove('active'); });
-                    item.classList.add('active');
-                });
+            if (!charList) return;
+
+            var characters = [];
+            // 优先从 swsproj 读取项目角色
+            if (window._projectData && window._projectData.characters && window._projectData.characters.length > 0) {
+                characters = window._projectData.characters;
             }
+
+            var defaultAvatars = ['🧔','👨','👩','👨🦳','👩🦰','👴','🧑','👩🦱','👨🦱'];
+            var charHTML = '';
+            characters.forEach(function(charObj, idx) {
+                var name = typeof charObj === 'string' ? charObj : (charObj.name || '');
+                var id = typeof charObj === 'string' ? 'char-str-' + idx : (charObj.id || 'char-' + idx);
+                var avatar = defaultAvatars[idx % defaultAvatars.length];
+                var color = (charObj.color) || (window._projectData && window._projectData.characterColors && window._projectData.characterColors[name]) || '#999';
+                var tagline = (charObj.tagline) || '';
+                charHTML += '<div class="char-item" data-char-id="' + id + '" data-char-name="' + escHTML(name) + '">';
+                charHTML += '<div class="avatar" style="background:' + color + '22;color:' + color + ';">' + avatar + '</div>';
+                charHTML += '<div class="info">';
+                charHTML += '<div class="name">' + escHTML(name) + '</div>';
+                charHTML += '<div class="role">' + (tagline ? escHTML(tagline) : '角色') + '</div>';
+                charHTML += '</div></div>';
+            });
+            charList.innerHTML = charHTML;
 
             // 更新角色计数
             var countEl = document.querySelector('.sidebar-header .count');
             if (countEl) countEl.textContent = characters.length;
-
-            // 更新剧情轴 hint
-            var hintEl = document.querySelector('.storybar-header .hint');
-            if (hintEl) hintEl.textContent = scenes.length + ' 场 · ' + characters.length + ' 个角色';
-
-            console.log('[Timeline] 已渲染 ' + scenes.length + ' 场, ' + characters.length + ' 个角色');
+            // 角色选中由 init-time 事件委托处理，无需重复绑定
         };
+
+        // ===== 添加角色 Modal（事件委托，不依赖 DOM 加载时序） =====
+        window._openAddCharModal = function() {
+            var modal = document.getElementById('add-char-modal');
+            var nameInput = document.getElementById('add-char-name');
+            var bioInput = document.getElementById('add-char-bio');
+            var confirmBtn = document.getElementById('add-char-confirm');
+            if (!modal || !nameInput) return;
+            nameInput.value = '';
+            if (bioInput) bioInput.value = '';
+            if (confirmBtn) confirmBtn.disabled = true;
+            modal.classList.add('open');
+            setTimeout(function() { nameInput.focus(); }, 50);
+        };
+
+        window._closeAddCharModal = function() {
+            var modal = document.getElementById('add-char-modal');
+            if (modal) modal.classList.remove('open');
+        };
+
+        window._submitAddChar = function() {
+            var nameInput = document.getElementById('add-char-name');
+            var bioInput = document.getElementById('add-char-bio');
+            var name = nameInput ? nameInput.value.trim() : '';
+            if (!name) return;
+            var bio = bioInput ? bioInput.value.trim() : '';
+            var payload = { action: 'addCharacter', name: name };
+            if (bio) payload.bio = bio;
+            window.webkit.messageHandlers.swsproj.postMessage(payload);
+            window._closeAddCharModal();
+        };
+
+        // 事件委托：sidebar 内所有交互
+        document.addEventListener('click', function(e) {
+            // + 按钮
+            if (e.target.closest('#sidebar .add-char')) {
+                e.stopPropagation();
+                window._openAddCharModal();
+                return;
+            }
+            // modal 遮罩点击关闭
+            if (e.target.id === 'add-char-modal') {
+                window._closeAddCharModal();
+                return;
+            }
+            // modal 内确认按钮
+            if (e.target.id === 'add-char-confirm') {
+                window._submitAddChar();
+                return;
+            }
+            // modal 内取消按钮
+            if (e.target.id === 'add-char-cancel') {
+                window._closeAddCharModal();
+                return;
+            }
+        });
+
+        document.addEventListener('keydown', function(e) {
+            var modal = document.getElementById('add-char-modal');
+            if (!modal || !modal.classList.contains('open')) return;
+            if (e.key === 'Escape') { window._closeAddCharModal(); return; }
+            if (e.key === 'Enter' && document.activeElement && document.activeElement.id === 'add-char-name') {
+                e.preventDefault();
+                window._submitAddChar();
+            }
+        });
+
+        document.addEventListener('input', function(e) {
+            if (e.target.id !== 'add-char-name') return;
+            var confirmBtn = document.getElementById('add-char-confirm');
+            if (confirmBtn) confirmBtn.disabled = !e.target.value.trim();
+        });
 
         function escHTML(s) {
             if (!s) return '';
@@ -2389,6 +2574,26 @@ enum ScriptwritingLayout {
         });
 
     </script>
+
+    <!-- ===== 添加角色 Modal ===== -->
+    <div class="modal-backdrop" id="add-char-modal">
+        <div class="modal-card">
+            <h3>👤 添加角色</h3>
+            <div class="field">
+                <label>角色名称 <span style="color:var(--accent);">*</span></label>
+                <input type="text" id="add-char-name" placeholder="例如：张伟" autofocus />
+            </div>
+            <div class="field">
+                <label>简介（可选）</label>
+                <textarea id="add-char-bio" placeholder="一句话描述角色…"></textarea>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-cancel" id="add-char-cancel">取消</button>
+                <button class="btn-add" id="add-char-confirm">添加</button>
+            </div>
+        </div>
+    </div>
+
     </div><!-- /main-wrapper -->
     </div><!-- /app-layout -->
     </body>
@@ -2441,6 +2646,9 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
         case "addCharacter":
             if let name = body["name"] as? String {
                 mgr.addCharacter(name: name, avatar: body["avatar"] as? String, tagline: body["tagline"] as? String, bio: body["bio"] as? String)
+                // 自动保存 swsproj 并推回 JS 刷新侧栏
+                try? mgr.save()
+                pushProjectToWebView()
             }
         case "addScene":
             if let title = body["title"] as? String {
