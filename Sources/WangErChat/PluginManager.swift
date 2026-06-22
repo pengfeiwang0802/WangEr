@@ -412,138 +412,6 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         }
     }
 
-    // MARK: - 编辑器验证
-
-    /// 验证所有行 + 保存
-    private func validateAndSave(webView: WKWebView, url: URL) {
-        let js = buildValidateJS()
-        webView.evaluateJavaScript(js) { [weak self] result, error in
-            guard let self = self else { return }
-            if let error = error {
-                print("ScriptwritingPlugin: 验证失败 \(error)")
-                // 降级：直接保存
-                self.extractAndSave(webView: webView, url: url)
-                return
-            }
-            guard let resultStr = result as? String else {
-                print("ScriptwritingPlugin: 验证结果为空，直接保存")
-                self.extractAndSave(webView: webView, url: url)
-                return
-            }
-
-            // 解析验证结果
-            // 格式: "OK" 或 "INVALID:行号1,行号2,..."
-            if resultStr.hasPrefix("INVALID:") {
-                let invalidLinesStr = String(resultStr.dropFirst(8))
-                let invalidLines = invalidLinesStr.split(separator: ",").compactMap { Int($0) }
-                print("ScriptwritingPlugin: 发现 \(invalidLines.count) 行格式异常")
-
-                // 弹确认框
-                let alert = NSAlert()
-                alert.messageText = "有 \(invalidLines.count) 行格式异常"
-                alert.informativeText = "异常行已被红色标记标出。\n\n保存后异常行将按普通文本处理，不会丢失内容。\n\n是否继续保存？"
-                alert.addButton(withTitle: "继续保存")
-                alert.addButton(withTitle: "取消")
-                alert.alertStyle = .warning
-
-                let response = alert.runModal()
-                if response == .alertFirstButtonReturn {
-                    self.extractAndSave(webView: webView, url: url)
-                }
-            } else {
-                print("ScriptwritingPlugin: 验证通过，全部格式正确")
-                self.extractAndSave(webView: webView, url: url)
-            }
-        }
-    }
-
-    /// 构建验证 JS：遍历编辑器每行，检查格式
-    private func buildValidateJS() -> String {
-        return """
-        (function() {
-            var body = document.getElementById('editor-body');
-            if (!body) return 'OK';
-            var invalidLines = [];
-            var children = body.children;
-            for (var i = 0; i < children.length; i++) {
-                var el = children[i];
-                var text = (el.innerText || el.textContent || '').trim();
-                if (text === '') continue; // 空行跳过
-
-                var type = el.getAttribute('data-sws-type') || '';
-                var valid = false;
-
-                if (type === 'dialogue') {
-                    // 对白行：检查是否包含角色名信息
-                    // dialogue 块内，角色名行和台词行都有 data-sws-type=dialogue
-                    // 角色名行有 class="sws-dialogue-name"
-                    var isNameLine = el.classList.contains('sws-dialogue-name');
-                    if (isNameLine) {
-                        // 角色名行：非空即可
-                        valid = text.length > 0;
-                    } else {
-                        // 台词行：非空即可
-                        valid = text.length > 0;
-                    }
-                } else if (type === 'action') {
-                    // 动作描述行：非空即可
-                    valid = text.length > 0;
-                } else if (type === 'unattributed') {
-                    // 未标注对白：非空即可
-                    valid = text.length > 0;
-                } else {
-                    // 没有 data-sws-type 的行（可能是硬编码示例内容）
-                    // 尝试根据 CSS 类名判断
-                    if (el.classList.contains('scene-heading')) {
-                        valid = text.startsWith('第') || text.startsWith('##') || text.length > 0;
-                    } else if (el.classList.contains('character')) {
-                        valid = text.length > 0 && text.length <= 10;
-                    } else if (el.classList.contains('dialogue')) {
-                        valid = text.length > 0;
-                    } else if (el.classList.contains('action')) {
-                        valid = text.length > 0;
-                    } else {
-                        // 未知类型行：宽松处理，标记为警告
-                        valid = true;
-                    }
-                }
-
-                if (!valid) {
-                    invalidLines.push(i);
-                    // 标红：加红色左边框
-                    el.style.borderLeft = '3px solid #e74c3c';
-                    el.style.paddingLeft = '8px';
-                    el.style.backgroundColor = 'rgba(231, 76, 60, 0.08)';
-                } else {
-                    // 清除旧的红色标记
-                    if (el.style.borderLeft && el.style.borderLeft.includes('e74c3c')) {
-                        el.style.borderLeft = '';
-                        el.style.paddingLeft = '';
-                        el.style.backgroundColor = '';
-                    }
-                }
-            }
-
-            // 清除所有行左侧的旧验证标记
-            // 先清除所有行的标记，再重新标记无效行
-            for (var i = 0; i < children.length; i++) {
-                var el = children[i];
-                var text = (el.innerText || el.textContent || '').trim();
-                if (text === '') continue;
-                // 如果不在 invalidLines 中，清除标记
-                if (invalidLines.indexOf(i) === -1) {
-                    el.style.borderLeft = '';
-                    el.style.paddingLeft = '';
-                    el.style.backgroundColor = '';
-                }
-            }
-
-            if (invalidLines.length === 0) return 'OK';
-            return 'INVALID:' + invalidLines.join(',');
-        })();
-        """
-    }
-
     /// 清除所有红色验证标记
     private func clearInvalidMarks(webView: WKWebView) {
         let js = """
@@ -560,179 +428,6 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         })();
         """
         webView.evaluateJavaScript(js, completionHandler: nil)
-    }
-
-    /// 从编辑器提取文本并保存
-    private func extractAndSave(webView: WKWebView, url: URL) {
-        let js = """
-        (function() {
-            var body = document.getElementById('editor-body');
-            if (!body) return JSON.stringify([]);
-            var lines = [];
-            // 遍历所有 contenteditable 行（包括 dialogue 容器内的子行）
-            var allEditable = body.querySelectorAll('[contenteditable="true"]');
-            for (var i = 0; i < allEditable.length; i++) {
-                var el = allEditable[i];
-                var text = el.innerText || el.textContent || '';
-                text = text.replace(/\\n/g, '').trim();
-                var lineType = el.getAttribute('data-line-type') || '';
-                var character = el.getAttribute('data-character') || '';
-                lines.push({
-                    text: text,
-                    lineType: lineType,
-                    character: character
-                });
-            }
-            return JSON.stringify(lines);
-        })();
-        """
-
-        webView.evaluateJavaScript(js) { [weak self] result, error in
-            guard let self = self else { return }
-            if let error = error {
-                print("ScriptwritingPlugin: 提取编辑器内容失败 \(error)")
-                return
-            }
-            guard let jsonStr = result as? String, !jsonStr.isEmpty,
-                  let data = jsonStr.data(using: .utf8),
-                  let lines = try? JSONSerialization.jsonObject(with: data) as? [[String: String]] else {
-                print("ScriptwritingPlugin: 编辑器内容解析失败")
-                return
-            }
-
-            // 根据 data-line-type 重建 SWSDocument
-            let document = self.buildDocumentFromLines(lines)
-            let formatter = SWSFormatter()
-            let output = formatter.serialize(document)
-
-            do {
-                try output.write(to: url, atomically: true, encoding: .utf8)
-                print("ScriptwritingPlugin: 已保存到 \(url.lastPathComponent)")
-                // 更新 currentDocument
-                self.currentDocument = document
-            } catch {
-                print("ScriptwritingPlugin: 保存失败 \(error)")
-            }
-        }
-    }
-
-    // MARK: - 从编辑器行重建 SWSDocument
-
-    /// 从文本解析场景头（简化版，不依赖 SWSFormatter 的私有方法）
-    private func parseSceneHeadingFromText(_ text: String) -> SWSSceneHeading {
-        let t = text.hasPrefix("##") ? String(text.dropFirst(3)) : text
-        let trimmed = t.trimmingCharacters(in: .whitespaces)
-        // 尝试提取数字
-        var s = trimmed
-        for prefix in ["第", "场", "章", "Scene", "scene", "Act", "act"] {
-            s = s.replacingOccurrences(of: prefix, with: "")
-        }
-        let number = s.trimmingCharacters(in: .whitespaces).components(separatedBy: " ").first ?? "1"
-        return SWSSceneHeading(number: number.isEmpty ? "1" : number, separator: " · ")
-    }
-
-    /// 从编辑器行数据重建 SWSDocument
-    /// 利用 data-line-type 信息，不需要重新解析文本
-    private func buildDocumentFromLines(_ lines: [[String: String]]) -> SWSDocument {
-        var scenes: [SWSScene] = []
-        var currentHeading: SWSSceneHeading?
-        var currentBlocks: [SWSBlock] = []
-        /// 待绑定的角色名 + 修饰语（dialogue-name 行记录，dialogue-text 行消费）
-        var pendingCharacter: (name: String, modifier: String?)?
-        var currentActionLines: [String] = []
-
-        func flushAction() {
-            guard !currentActionLines.isEmpty else { return }
-            let text = currentActionLines.joined(separator: "\n")
-            currentBlocks.append(.action(SWSActionBlock(text: text)))
-            currentActionLines = []
-        }
-
-        func flushScene() {
-            flushAction()
-            if currentHeading != nil || !currentBlocks.isEmpty {
-                let scene = SWSScene(heading: currentHeading, blocks: currentBlocks)
-                scenes.append(scene)
-            }
-            currentHeading = nil
-            currentBlocks = []
-            pendingCharacter = nil
-            currentActionLines = []
-        }
-
-        for line in lines {
-            let text = line["text"] ?? ""
-            let lineType = line["lineType"] ?? ""
-            let character = line["character"] ?? ""
-
-            if text.isEmpty && lineType != "scene-heading" {
-                // 空行：结束当前 action / clear pending character
-                pendingCharacter = nil
-                flushAction()
-                continue
-            }
-
-            switch lineType {
-            case "scene-heading":
-                flushScene()
-                currentHeading = parseSceneHeadingFromText(text)
-
-            case "dialogue-name":
-                flushAction()
-                let (name, modifier) = extractCharacterAndModifier(from: text)
-                pendingCharacter = (name, modifier)
-
-            case "dialogue-text":
-                flushAction()
-                if let pc = pendingCharacter {
-                    currentBlocks.append(.dialogue(SWSDialogueBlock(character: pc.name, modifier: pc.modifier, line: text)))
-                } else if !character.isEmpty {
-                    currentBlocks.append(.dialogue(SWSDialogueBlock(character: character, modifier: nil, line: text)))
-                } else {
-                    // 没有上下文，作为 unattributed
-                    currentBlocks.append(.unattributed(SWSUnattributedBlock(lines: [text])))
-                }
-
-            case "action":
-                pendingCharacter = nil
-                currentActionLines.append(text)
-
-            case "unattributed":
-                pendingCharacter = nil
-                flushAction()
-                currentBlocks.append(.unattributed(SWSUnattributedBlock(lines: [text])))
-
-            default:
-                // 未知类型，尝试作为 action
-                pendingCharacter = nil
-                currentActionLines.append(text)
-            }
-        }
-
-        // 收尾
-        flushScene()
-
-        let metadata = currentDocument?.metadata ?? SWSMetadata()
-        return SWSDocument(metadata: metadata, scenes: scenes)
-    }
-
-    /// 从一行文本中提取角色名和修饰语
-    /// 支持格式："王二" → ("王二", nil)
-    ///           "王二（OV）" → ("王二", "OV")
-    ///           "王二（低头笑了一声）" → ("王二", "低头笑了一声")
-    private func extractCharacterAndModifier(from text: String) -> (String, String?) {
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
-        // 检查中文括号
-        if let openIdx = trimmed.firstIndex(of: "（"),
-           let closeIdx = trimmed.lastIndex(of: "）"),
-           openIdx < closeIdx {
-            let name = trimmed[..<openIdx].trimmingCharacters(in: .whitespaces)
-            let modifier = trimmed[trimmed.index(after: openIdx)..<closeIdx].trimmingCharacters(in: .whitespaces)
-            if !name.isEmpty && !modifier.isEmpty {
-                return (name, modifier)
-            }
-        }
-        return (trimmed, nil)
     }
 
     // MARK: - 窗口/WebView 查找辅助
@@ -1347,28 +1042,6 @@ enum ScriptwritingLayout {
                 font-size: 0.7em;
                 color: var(--text-muted);
             }
-            #sidebar .sidebar-footer {
-                padding: 8px;
-                border-top: 1px solid var(--border);
-                display: flex;
-                gap: 4px;
-            }
-            #sidebar .sidebar-footer button {
-                flex: 1;
-                padding: 5px 0;
-                font-size: 0.7em;
-                border-radius: 4px;
-                border: 1px solid var(--border);
-                background: var(--bg-tertiary);
-                color: var(--text-secondary);
-                cursor: pointer;
-                transition: all 0.15s;
-            }
-            #sidebar .sidebar-footer button:hover {
-                background: var(--accent-soft);
-                border-color: var(--accent);
-                color: var(--text-primary);
-            }
 
             /* ========== 模式切换栏（显示区左上方） ========== */
             #mode-toolbar {
@@ -1830,10 +1503,6 @@ enum ScriptwritingLayout {
             <div class="char-list" id="char-list">
                 <!-- 加载 .sws 文件后由 renderTimelineFromSWSBase64 动态渲染 -->
             </div>
-            <div class="sidebar-footer">
-                <button title="打开角色面板">📋 详情</button>
-                <button title="从剧本提取角色">🔄 提取</button>
-            </div>
         </div>
 
         <!-- ===== Resize Handle ===== -->
@@ -1880,50 +1549,15 @@ enum ScriptwritingLayout {
         const btnToggle = document.getElementById('btn-toggle-sidebar');
         btnToggle.addEventListener('click', () => {
             sidebar.classList.toggle('collapsed');
-            btnToggle.textContent = sidebar.classList.contains('collapsed') ? '📂' : '📂';
+            btnToggle.textContent = sidebar.classList.contains('collapsed') ? '📁' : '📂';
         });
 
-        // ===== 选项卡切换：时间轴（编辑） / 剧本（只读预览） =====
+        // ===== 默认时间轴模式 =====
         const timelineArea = document.getElementById('timeline-area');
         const scriptArea = document.getElementById('script-area');
-        const modeLabel = document.getElementById('mode-label');
         const handle = document.getElementById('resize-handle');
-
-        function onModeChange(mode) {
-            console.log('[onModeChange] called with mode=' + mode);
-            const isTimeline = mode === 'timeline';
-            console.log('[onModeChange] isTimeline=' + isTimeline + ', timelineArea=' + !!timelineArea + ', scriptArea=' + !!scriptArea + ', sidebar=' + !!sidebar);
-
-            // 更新模式标签
-            if (modeLabel) {
-                modeLabel.textContent = isTimeline ? '📋 时间轴（编辑）' : '📄 剧本（只读预览）';
-            }
-
-            // 切换内容区
-            timelineArea.style.display = isTimeline ? 'flex' : 'none';
-            scriptArea.style.display  = isTimeline ? 'none' : '';
-            console.log('[onModeChange] timelineArea.display=' + timelineArea.style.display + ', scriptArea.display=' + scriptArea.style.display);
-
-            // 时间轴模式：显示侧边栏；剧本模式：隐藏侧边栏（全宽阅读）
-            if (isTimeline) {
-                sidebar.classList.remove('collapsed');
-                btnToggle.textContent = '📂';
-                handle.style.display = '';
-            } else {
-                sidebar.classList.add('collapsed');
-                btnToggle.textContent = '📂';
-                handle.style.display = 'none';
-                // 切换到剧本模式时，刷新剧本预览
-                if (typeof window._renderScriptPreview === 'function') {
-                    window._renderScriptPreview();
-                }
-            }
-            console.log('[onModeChange] done');
-        }
-        window.onModeChange = onModeChange;
-
-        // 默认时间轴模式
-        onModeChange('timeline');
+        if (timelineArea) timelineArea.style.display = 'flex';
+        if (scriptArea) scriptArea.style.display = 'none';
 
         // _renderScriptPreview — 确保剧本预览有内容
         window._renderScriptPreview = function() {
@@ -2144,14 +1778,6 @@ enum ScriptwritingLayout {
                 cardHTML += '<div class="add-scene-card" title="添加新场" id="add-scene-big"><span class="add-scene-icon">＋</span><span class="add-scene-label">添加新场</span></div>';
                 scroll.innerHTML = cardHTML;
 
-                // rebind all add-scene buttons (separators + big bottom button)
-                scroll.querySelectorAll('.add-scene-btn, .add-scene-card').forEach(function(btn) {
-                    btn.addEventListener('click', function() {
-                        this.style.borderColor = 'var(--accent)';
-                        this.style.color = 'var(--accent)';
-                        setTimeout(function(){ this.style.borderColor = ''; this.style.color = ''; }.bind(this), 300);
-                    }.bind(btn));
-                });
             }
 
             // ── 渲染底部时间轴节点 ──
@@ -2342,23 +1968,22 @@ enum ScriptwritingLayout {
                 return;
             }
 
-            // Backspace at start of line
-            if (e.key === 'Backspace' && isAtStart(el)) {
-                // 有内容可退格（空行、文本等）→ 浏览器原生处理，逐字/逐行删除
-                var blkText = (el.innerText || '').trim();
-                if (blkText.length > 0) { return; }
+            // Backspace：先判断内容是否为空，再判断光标位置
+            if (e.key === 'Backspace') {
+                var blkText = el.innerText || '';
+                if (blkText.length > 0) return; // 有内容（含空行）→ 浏览器原生处理
 
-                // 内容为空：场景内唯一一行 → 不删（底线守卫）
-                var allWraps = document.querySelectorAll('.block-wrap[data-scene="' + sceneNum + '"]');
-                if (allWraps.length <= 1) {
-                    e.preventDefault();
-                    return;
-                }
-
-                // 内容为空 + 非最后一块：dialogue 不删 pair（只在 chip 选中态删），action 直接删 block
+                // 内容为空 → 拦截所有 Backspace，防止浏览器默认行为（丢焦点/导航回退等）
                 e.preventDefault();
-                el.blur();
+                if (!isAtStart(el)) return; // 光标不在最开头（contenteditable 隐式<br>等）→ 只拦截
+
+                // 内容为空 + 光标在起始位置
+                var allWraps = document.querySelectorAll('.block-wrap[data-scene="' + sceneNum + '"]');
+                if (allWraps.length <= 1) return; // 场景内唯一一行 → 底线守卫
+
+                // 非最后一块：action 删 block，dialogue 不删（只在 chip 选中态删）
                 if (type !== 'dialogue') {
+                    el.blur();
                     if (send) send.postMessage({ action:'deleteBlock', scene:sceneNum, blockIndex:blockIdx });
                 }
                 return;
@@ -2387,8 +2012,6 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
             handleInsertBlock(body)
         case "deleteBlock":
             handleDeleteBlock(body)
-        case "deleteAndReplaceWithAction":
-            handleDeleteAndReplaceWithAction(body)
         case "insertBlockBefore":
             handleInsertBlockBefore(body)
         case "deletePairAndFocusPrevious":
@@ -2508,29 +2131,6 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                 self?.focusBlock(scene: sceneNum, blockIndex: focusIdx)
             }
-        }
-    }
-
-    private func handleDeleteAndReplaceWithAction(_ body: [String: Any]) {
-        guard let sceneNum = body["scene"] as? String,
-              let blockIdx = body["blockIndex"] as? Int,
-              let doc = currentDocument else { return }
-
-        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
-        var scene = doc.scenes[sceneIdx]
-        guard blockIdx < scene.blocks.count else { return }
-
-        var blocks = scene.blocks
-        blocks[blockIdx] = .action(SWSActionBlock(text: ""))
-
-        scene = SWSScene(heading: scene.heading, blocks: blocks)
-        var scenes = doc.scenes
-        scenes[sceneIdx] = scene
-        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
-
-        renderCurrentDocument()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            self?.focusBlock(scene: sceneNum, blockIndex: blockIdx)
         }
     }
 
