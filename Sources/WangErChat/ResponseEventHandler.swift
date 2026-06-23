@@ -13,14 +13,14 @@ public enum StatusPriority: Int {
 // MARK: - UI 回调协议
 protocol ResponseEventHandlerDelegate: AnyObject {
     func eventHandler(_ handler: ResponseEventHandler, setStatusAdvanced text: String, priority: StatusPriority, color: NSColor, alpha: CGFloat)
-    func eventHandler(_ handler: ResponseEventHandler, setStatusForce text: String, color: NSColor, alpha: CGFloat)
+    func eventHandler(_ handler: ResponseEventHandler, setStatusForce text: String, priority: StatusPriority, color: NSColor, alpha: CGFloat)
     func eventHandler(_ handler: ResponseEventHandler, showStep icon: String, text: String, progress: Double)
-    func eventHandler(_ handler: ResponseEventHandler, hideStep: Void)
+    func eventHandler(_ handler: ResponseEventHandler, hideStep: ())
     func eventHandler(_ handler: ResponseEventHandler, animateIcons: [String])   // start animation with icons
-    func eventHandler(_ handler: ResponseEventHandler, stopAnimation: Void)
+    func eventHandler(_ handler: ResponseEventHandler, stopAnimation: ())
     func eventHandler(_ handler: ResponseEventHandler, executeJS: String)
     func eventHandler(_ handler: ResponseEventHandler, updateLiveTokenDisplay input: Int, output: Int, streamCharCount: Int)
-    func eventHandler(_ handler: ResponseEventHandler, finalizeStream: Void)
+    func eventHandler(_ handler: ResponseEventHandler, finalizeStream: ())
 }
 
 // MARK: - ResponseEventHandler
@@ -176,7 +176,7 @@ class ResponseEventHandler {
                     sessionManager.totalCompletionTokens = outputTokens
                 }
                 // 触发 UI 更新
-                d.eventHandler(self, setStatusForce: "🤖 就绪", color: .clear, alpha: 0)
+                d.eventHandler(self, setStatusForce: "🤖 就绪", priority: .ready, color: .clear, alpha: 0)
                 d.eventHandler(self, hideStep: ())
                 d.eventHandler(self, stopAnimation: ())
                 // finalize 延迟 50ms 后执行(让最后一个 delta 先渲染)
@@ -184,7 +184,7 @@ class ResponseEventHandler {
                     d.eventHandler(self, finalizeStream: ())
                 }
             } else {
-                d.eventHandler(self, setStatusForce: "🤖 就绪", color: .clear, alpha: 0)
+                d.eventHandler(self, setStatusForce: "🤖 就绪", priority: .ready, color: .clear, alpha: 0)
                 d.eventHandler(self, hideStep: ())
                 d.eventHandler(self, stopAnimation: ())
             }
@@ -193,7 +193,7 @@ class ResponseEventHandler {
             if let err = json["error"] as? [String: Any], let msg = err["message"] as? String {
                 d.eventHandler(self, executeJS: "addMessage('assistant','❌ 错误: \(msg.escapedForJS)')")
             }
-            d.eventHandler(self, setStatusForce: "❌ 请求失败", color: .systemRed, alpha: 0.35)
+            d.eventHandler(self, setStatusForce: "❌ 请求失败", priority: .ready, color: .systemRed, alpha: 0.35)
             d.eventHandler(self, hideStep: ())
             d.eventHandler(self, stopAnimation: ())
             DispatchQueue.main.async {

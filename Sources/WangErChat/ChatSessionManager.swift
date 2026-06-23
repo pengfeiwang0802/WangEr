@@ -9,7 +9,6 @@ class ChatSessionManager {
     var currentConversationIndex: Int = 0
     var totalPromptTokens: Int = 0
     var totalCompletionTokens: Int = 0
-    var streamCharCount: Int = 0
 
     var currentMessages: [[String: String]] {
         get {
@@ -81,7 +80,6 @@ class ChatSessionManager {
         currentConversationIndex = index
         totalPromptTokens = 0
         totalCompletionTokens = 0
-        streamCharCount = 0
         return true
     }
 

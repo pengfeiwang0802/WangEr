@@ -947,7 +947,6 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
 
     private func stopGenerating() {
         responseEventHandler.reset()
-        sessionManager.streamCharCount = 0
         isGenerating = false; isFinalizing = false; sendButton.isHidden = false; stopButton.isHidden = true
         // 方案1&3: 使用增强状态系统
         setStatusForce("🤖 就绪", priority: .ready)
@@ -1023,7 +1022,6 @@ extension ChatViewController {
         let text = responseEventHandler.streamedTextBuffer
         responseEventHandler.streamedTextBuffer = ""
         let charCount = responseEventHandler.streamCharCount
-        sessionManager.streamCharCount = 0
 
         if !text.isEmpty {
             currentMessages.append(["role": "assistant", "content": text])
@@ -1255,15 +1253,15 @@ extension ChatViewController: ResponseEventHandlerDelegate {
         setStatusAdvanced(text, priority: priority, color: color, alpha: alpha)
     }
 
-    func eventHandler(_ handler: ResponseEventHandler, setStatusForce text: String, color: NSColor, alpha: CGFloat) {
-        setStatusForce(text, priority: .ready, color: color, alpha: alpha)
+    func eventHandler(_ handler: ResponseEventHandler, setStatusForce text: String, priority: StatusPriority, color: NSColor, alpha: CGFloat) {
+        setStatusForce(text, priority: priority, color: color, alpha: alpha)
     }
 
     func eventHandler(_ handler: ResponseEventHandler, showStep icon: String, text: String, progress: Double) {
         showStepIndicator(icon: icon, text: text, progress: progress)
     }
 
-    func eventHandler(_ handler: ResponseEventHandler, hideStep: Void) {
+    func eventHandler(_ handler: ResponseEventHandler, hideStep: ()) {
         hideStepIndicator()
     }
 
@@ -1271,7 +1269,7 @@ extension ChatViewController: ResponseEventHandlerDelegate {
         startStatusIconAnimation(icons: animateIcons)
     }
 
-    func eventHandler(_ handler: ResponseEventHandler, stopAnimation: Void) {
+    func eventHandler(_ handler: ResponseEventHandler, stopAnimation: ()) {
         stopStatusIconAnimation()
     }
 
@@ -1285,7 +1283,7 @@ extension ChatViewController: ResponseEventHandlerDelegate {
         tokenLabel.stringValue = "⚡ \(formatNumber(input)) + \(formatNumber(compTok)) = \(formatNumber(total)) tok"
     }
 
-    func eventHandler(_ handler: ResponseEventHandler, finalizeStream: Void) {
+    func eventHandler(_ handler: ResponseEventHandler, finalizeStream: ()) {
         if !isFinalizing {
             finalizeAndUpdateStats()
         }
