@@ -868,7 +868,7 @@ extension ChatViewController: NSTextViewDelegate {
         }
 
         currentMessages.append(["role": "user", "content": text])
-        js("addMessage('user','\(escJS(text))')")
+        js("addMessage('user','\(text.escapedForJS)')")
         sendStreamToGateway(text)
     }
 
@@ -999,14 +999,7 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
             }
         }
     }
-    func escJS(_ s: String) -> String {
-        s.replacingOccurrences(of: "\\", with: "\\\\")
-         .replacingOccurrences(of: "'", with: "\\'")
-         .replacingOccurrences(of: "\"", with: "\\\"")
-         .replacingOccurrences(of: "\n", with: "\\n")
-         .replacingOccurrences(of: "\r", with: "\\r")
-         .replacingOccurrences(of: "\t", with: "\\t")
-    }
+
 }
 
 // MARK: - SSE 事件处理 (URLSession 委托已移至 StreamSession)
@@ -1114,7 +1107,7 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段")
 
             case "response.output_text.delta":
                 if let content = json["delta"] as? String {
-                    self.js("apd('\(self.escJS(content))')")
+                    self.js("apd('\(content.escapedForJS)')")
                     self.sessionManager.streamCharCount += content.count
                     let liveTotal = self.sessionManager.totalPromptTokens + self.sessionManager.totalCompletionTokens + self.sessionManager.streamCharCount / 3
                     self.tokenLabel.stringValue = "⚡ \(formatNumber(self.sessionManager.totalPromptTokens)) + \(formatNumber(self.sessionManager.totalCompletionTokens + self.sessionManager.streamCharCount / 3)) = \(formatNumber(liveTotal)) tok"
@@ -1177,7 +1170,7 @@ AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
 
             case "response.failed":
                 if let err = json["error"] as? [String: Any], let msg = err["message"] as? String {
-                    self.js("addMessage('assistant','❌ 错误: \(self.escJS(msg))')")
+                    self.js("addMessage('assistant','❌ 错误: \(msg.escapedForJS)')")
                 }
                 self.setStatusForce("❌ 请求失败", priority: .ready, color: .systemRed, alpha: 0.35)
                 self.hideStepIndicator()
@@ -1251,7 +1244,7 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
             let fileId = saveFileToCache(data: data, filename: filename)
             let dataUrl = "data:\(mimeType);base64,\(base64)"
             currentMessages.append(["role": "user", "content": "[图片] \(filename)", "type": "image", "fileId": fileId])
-            js("addImageMessage('user','\(dataUrl)','\(escJS(filename))')")
+            js("addImageMessage('user','\(dataUrl)','\(filename.escapedForJS)')")
             // 发送图片到 Gateway
             sendImageToGateway(imageData: dataUrl, filename: filename, text: text)
         } else {
@@ -1260,7 +1253,7 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
             let ext = fileExtension(filename)
             let fileSizeStr = formatFileSize(data.count)
             currentMessages.append(["role": "user", "content": "[文件] \(filename)", "type": "file", "fileId": fileId, "fileSize": "\(data.count)"])
-            js("addFileCard('user','\(escJS(filename))','\(fileSizeStr)','\(fileId)','\(ext)')")
+            js("addFileCard('user','\(filename.escapedForJS)','\(fileSizeStr)','\(fileId)','\(ext)')")
             // 发送文件到 Gateway
             sendFileToGateway(fileData: base64, filename: filename, mimeType: mimeType, text: text)
         }
@@ -1374,9 +1367,9 @@ AppLogger.shared.log("[Warning] Message \(msgIndex) has empty content, skipping"
                     if let imageData = try? Data(contentsOf: fileURL) {
                         let mimeType = mimeTypeForFile(fileId)
                         let dataUrl = "data:\(mimeType);base64,\(imageData.base64EncodedString())"
-                        self.js("addImageMessage('\(self.escJS(role))','\(dataUrl)','\(self.escJS(content))')")
+                        self.js("addImageMessage('\(role.escapedForJS)','\(dataUrl)','\(content.escapedForJS)')")
                     } else {
-                        self.js("addMessage('\(self.escJS(role))','\(self.escJS(content)) [缓存丢失]')")
+                        self.js("addMessage('\(role.escapedForJS)','\(content.escapedForJS) [缓存丢失]')")
                     }
                 } else if type == "file", let fileId = msg["fileId"] {
                     // 恢复文件消息:渲染文件卡片
@@ -1385,12 +1378,12 @@ AppLogger.shared.log("[Warning] Message \(msgIndex) has empty content, skipping"
                     let fileSizeStr = formatFileSize(fileSize)
                     let ext = fileExtension(fileId)
                     if FileManager.default.fileExists(atPath: fileURL.path) {
-                        self.js("addFileCard('\(self.escJS(role))','\(self.escJS(content))','\(fileSizeStr)','\(fileId)','\(ext)')")
+                        self.js("addFileCard('\(role.escapedForJS)','\(content.escapedForJS)','\(fileSizeStr)','\(fileId)','\(ext)')")
                     } else {
-                        self.js("addMessage('\(self.escJS(role))','\(self.escJS(content)) [缓存丢失]')")
+                        self.js("addMessage('\(role.escapedForJS)','\(content.escapedForJS) [缓存丢失]')")
                     }
                 } else {
-                    self.js("addMessage('\(self.escJS(role))','\(self.escJS(content))')")
+                    self.js("addMessage('\(role.escapedForJS)','\(content.escapedForJS)')")
                 }
             }
         }
@@ -1412,7 +1405,7 @@ extension ChatViewController: StreamSessionDelegate {
         setStatusForce("❌ HTTP \(code)", priority: .ready)
         hideStepIndicator()
         let errorMsg = "⚠️ Gateway 返回 HTTP \(code)\n模型可能未在 Gateway 中注册,或 API Key 无效。"
-        js("addMessage('assistant','\(escJS(errorMsg))')")
+        js("addMessage('assistant','\(errorMsg.escapedForJS)')")
     }
 
     func streamSession(_ session: StreamSession, didCompleteWithError error: Error?) {
@@ -1423,7 +1416,7 @@ extension ChatViewController: StreamSessionDelegate {
             }
             AppLogger.shared.log("[Stream Error] 流中断: \(e.domain) code=\(e.code) \(e.localizedDescription)")
             if isGenerating && !isFinalizing {
-                js("addMessage('assistant','⚠️ 连接中断: \(escJS(e.localizedDescription))')")
+                js("addMessage('assistant','⚠️ 连接中断: \(e.localizedDescription.escapedForJS)')")
                 js("rt()")
                 finalizeAndUpdateStats()
             } else {
@@ -1442,7 +1435,7 @@ extension ChatViewController: StreamSessionDelegate {
     }
 
     func streamSession(_ session: StreamSession, didEncounterDecodeError message: String) {
-        js("addMessage('assistant','❌ \(escJS(message))')")
+        js("addMessage('assistant','❌ \(message.escapedForJS)')")
         finalizeAndUpdateStats()
     }
 }

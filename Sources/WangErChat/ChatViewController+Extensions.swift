@@ -51,7 +51,7 @@ extension ChatViewController {
         } catch {
 AppLogger.shared.log("[File Drop] 读取文件失败: \(error)")
             DispatchQueue.main.async {
-                self.js("addMessage('assistant','❌ 读取文件失败: \(self.escJS(error.localizedDescription))')")
+                self.js("addMessage('assistant','❌ 读取文件失败: \(error.localizedDescription.escapedForJS)')")
             }
         }
     }

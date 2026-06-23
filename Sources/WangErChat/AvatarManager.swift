@@ -46,7 +46,7 @@ class AvatarManager: NSObject {
     func setExpression(_ expr: String, userInitiated: Bool = false) {
         AppLogger.shared.log("[Avatar] setExpression 被调用: \(expr), isReady=\(isReady), userInitiated=\(userInitiated)")
         guard isReady else { AppLogger.shared.log("[Avatar] isReady=false, 跳过"); return }
-        let js = "setExpression('\(escJS(expr))')"
+        let js = "setExpression('\(expr.escapedForJS)')"
         AppLogger.shared.log("[Avatar] 执行 JS: \(js)")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -78,7 +78,7 @@ class AvatarManager: NSObject {
     /// 设置状态文本（底部标签）
     func setStatus(_ text: String) {
         guard isReady else { return }
-        let js = "setStatus('\(escJS(text))')"
+        let js = "setStatus('\(text.escapedForJS)')"
         DispatchQueue.main.async { [weak self] in
             self?.webView?.evaluateJavaScript(js)
         }
@@ -112,14 +112,7 @@ class AvatarManager: NSObject {
 
     // MARK: - 私有辅助
 
-    private func escJS(_ s: String) -> String {
-        s.replacingOccurrences(of: "\\", with: "\\\\")
-         .replacingOccurrences(of: "'", with: "\\'")
-         .replacingOccurrences(of: "\"", with: "\\\"")
-         .replacingOccurrences(of: "\n", with: "\\n")
-         .replacingOccurrences(of: "\r", with: "\\r")
-         .replacingOccurrences(of: "\t", with: "\\t")
-    }
+
 }
 
 // MARK: - WKNavigationDelegate
