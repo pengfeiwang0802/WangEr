@@ -91,6 +91,8 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
     private weak var scriptwritingWebView: WKWebView?
     /// 项目文件管理器（.swsproj）
     private let projectManager = SWSProjectManager()
+    /// 游离文件 URL 集合（不属于当前项目的已打开 .sws 文件）
+    private var openExternalURLs: [URL] = []
     /// Bridge ID counter
     private var bridgeIdCounter: Int = 0
 
@@ -171,6 +173,11 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
             // 持久化：记住最后打开的文件，下次打开编辑器自动恢复
             UserDefaults.standard.set(url.path, forKey: ScriptwritingPlugin.lastSWSFileKey)
+
+            // 追踪游离文件（去重）
+            if !openExternalURLs.contains(where: { $0.standardized == url.standardized }) {
+                openExternalURLs.append(url)
+            }
 
             // 窗口标题始终是编剧助手
             if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "scriptwriting" }) {
@@ -473,10 +480,8 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         guard let proj = projectManager.project else { return }
 
         // 构建完整 sidebar tree（含游离文件）
-        var externalURLs: [URL] = []
-        if let currentURL = currentFileURL, !projectManager.isScriptInProject(currentURL) {
-            externalURLs.append(currentURL)
-        }
+        // 使用 openExternalURLs 而非 currentFileURL，避免打开项目时游离文件丢失
+        let externalURLs = openExternalURLs.filter { !projectManager.isScriptInProject($0) }
         let fullTree = projectManager.sidebarTree(externalScripts: externalURLs)
         let json = ScriptwritingEditHandler.encodeProjectToJSON(proj, treeOverride: fullTree)
         bridgeSend(action: "loadProject", payload: ["json": json])
@@ -484,16 +489,12 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
     /// 仅推送 sidebar tree 到 WebView（无项目或游离文件场景）
     private func pushSidebarToWebView() {
-        // 收集当前打开的野生 .sws 文件
-        var externalURLs: [URL] = []
-        if let currentURL = currentFileURL {
-            if projectManager.isProjectOpen {
-                if !projectManager.isScriptInProject(currentURL) {
-                    externalURLs.append(currentURL)
-                }
-            } else {
-                externalURLs.append(currentURL)
-            }
+        // 收集已打开的游离 .sws 文件
+        let externalURLs: [URL]
+        if projectManager.isProjectOpen {
+            externalURLs = openExternalURLs.filter { !projectManager.isScriptInProject($0) }
+        } else {
+            externalURLs = openExternalURLs
         }
 
         if projectManager.isProjectOpen {

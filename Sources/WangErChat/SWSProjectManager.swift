@@ -53,12 +53,13 @@ final class SWSProjectManager {
         fileURL = projURL
         _isModified = false
 
-        // 3. 在文件夹内写入初始 .sws 文件
+        // 3. 在文件夹内写入初始 .sws 文件（统一 SWSFormatter 格式）
         if let ref = proj.scripts?.first {
             let swsURL = url.appendingPathComponent(ref.path)
             let doc = SWSDocument()
-            let data = try encoder.encode(doc)
-            try data.write(to: swsURL, options: .atomic)
+            let formatter = SWSFormatter()
+            let output = formatter.serialize(doc)
+            try output.write(to: swsURL, atomically: true, encoding: .utf8)
         }
     }
 
@@ -141,8 +142,9 @@ final class SWSProjectManager {
             throw ProjectError.noFileURL
         }
         let url = dir.appendingPathComponent(ref.path)
-        let data = try Data(contentsOf: url)
-        return try decoder.decode(SWSDocument.self, from: data)
+        let text = try String(contentsOf: url, encoding: .utf8)
+        var formatter = SWSFormatter()
+        return formatter.deserialize(text)
     }
 
     /// 保存 SWSDocument 到指定脚本引用的 .sws 文件
@@ -151,8 +153,9 @@ final class SWSProjectManager {
             throw ProjectError.noFileURL
         }
         let url = dir.appendingPathComponent(ref.path)
-        let data = try encoder.encode(doc)
-        try data.write(to: url, options: .atomic)
+        let formatter = SWSFormatter()
+        let output = formatter.serialize(doc)
+        try output.write(to: url, atomically: true, encoding: .utf8)
     }
 
     /// 新建 .sws 文件并添加到项目索引
@@ -160,10 +163,11 @@ final class SWSProjectManager {
         guard var proj = project else { throw ProjectError.noProject }
         guard let dir = projectDir else { throw ProjectError.noFileURL }
 
-        // 写入 .sws 文件
+        // 写入 .sws 文件（统一用 SWSFormatter 格式）
         let swsURL = dir.appendingPathComponent(fileName)
-        let data = try encoder.encode(doc)
-        try data.write(to: swsURL, options: .atomic)
+        let formatter = SWSFormatter()
+        let output = formatter.serialize(doc)
+        try output.write(to: swsURL, atomically: true, encoding: .utf8)
 
         // 添加到索引
         let ref = SWSProjectScriptRef(
@@ -506,7 +510,6 @@ enum ProjectError: LocalizedError {
     case noFileURL
     case invalidFileType(String)
     case unsupportedVersion(String)
-
     var errorDescription: String? {
         switch self {
         case .noProject: return "没有打开的项目"
