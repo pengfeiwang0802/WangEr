@@ -21,7 +21,8 @@ let package = Package(
         .executableTarget(
             name: "WangErChat",
             dependencies: ["SWS"],
-            path: "Sources/WangErChat"
+            path: "Sources/WangErChat",
+            resources: [.process("Resources")]
         ),
         .testTarget(
             name: "WangErChatTests",

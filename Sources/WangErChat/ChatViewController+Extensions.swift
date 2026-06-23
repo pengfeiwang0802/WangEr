@@ -6,11 +6,11 @@ extension ChatViewController: NSTextFieldDelegate {
     func controlTextDidEndEditing(_ obj: Notification) {
         guard let tf = obj.object as? NSTextField else { return }
         let row = conversationTableView.selectedRow
-        guard row >= 0, row < conversations.count else { return }
+        guard row >= 0, row < sessionManager.conversations.count else { return }
         let newTitle = tf.stringValue.trimmingCharacters(in: .whitespaces)
         if !newTitle.isEmpty {
-            conversations[row].title = newTitle
-            saveConversations()
+            sessionManager.conversations[row].title = newTitle
+            sessionManager.save()
         }
         tf.isEditable = false
         conversationTableView.reloadData()
@@ -60,7 +60,7 @@ AppLogger.shared.log("[File Drop] 读取文件失败: \(error)")
 // MARK: - NSTableView
 extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int {
-        return conversations.count
+        return sessionManager.conversations.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -80,7 +80,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 tf.centerYAnchor.constraint(equalTo: cell!.centerYAnchor),
             ])
         }
-        cell?.textField?.stringValue = conversations[safe: row]?.title ?? "会话"
+        cell?.textField?.stringValue = sessionManager.conversations[safe: row]?.title ?? "会话"
         return cell
     }
 
@@ -88,7 +88,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
         guard let tableView = notification.object as? NSTableView else { return }
         let row = tableView.selectedRow
         if tableView == conversationTableView {
-            if row >= 0 && row < conversations.count {
+            if row >= 0 && row < sessionManager.conversations.count {
                 switchToConversation(row)
             }
         }

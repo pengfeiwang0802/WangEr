@@ -57,16 +57,14 @@ class ChatViewController: NSViewController {
     // 可用模型列表(从 openclaw.json 读取)
     private var availableModels: [Models.ModelOption] = []
 
+    // === 会话管理 ===
+    let sessionManager = ChatSessionManager()
+
     // === 状态 ===
-    var conversations: [Conversation] = []
-    private var currentConversationIndex = 0
     private var isGenerating = false
     private var isFinalizing = false // 幂等锁:防止 finalize 被多次调用
     private var streamSession: StreamSession?
     private var safetyTimer: Timer?
-    private var totalPromptTokens = 0
-    private var totalCompletionTokens = 0
-    private var streamCharCount = 0
     private var jsErrorCount = 0  // JS 连续异常计数,超阈值触发 WebView 重新加载
 
 
@@ -120,11 +118,9 @@ class ChatViewController: NSViewController {
     var currentAgentId = "main"
 
     private var currentMessages: [[String: String]] {
-        get { conversations[safe: currentConversationIndex]?.messages ?? [] }
-        set { if conversations.indices.contains(currentConversationIndex) { conversations[currentConversationIndex].messages = newValue; saveConversations() } }
+        get { sessionManager.currentMessages }
+        set { sessionManager.currentMessages = newValue }
     }
-
-    private let savePath = "\(NSHomeDirectory())/.openclaw/workspace/WangErChat/conversations.json"
 
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 860, height: 660))
@@ -144,8 +140,8 @@ class ChatViewController: NSViewController {
         setupStepIndicator()
         // 加载持久化的会话,没有则创建默认
         loadConversations()
-        if conversations.isEmpty {
-            conversations = [Conversation(title: "💬 新对话 1")]
+        if sessionManager.conversations.isEmpty {
+            sessionManager.conversations = [Conversation(title: "💬 新对话 1")]
         }
         loadChatHTML()
         // 注册 JS 消息处理
@@ -153,9 +149,9 @@ class ChatViewController: NSViewController {
         updateUsageDisplay()
         fetchBalance()
         conversationTableView.reloadData()
-        let lastIndex = min(conversations.count - 1, 0)
+        let lastIndex = min(sessionManager.conversations.count - 1, 0)
         conversationTableView.selectRowIndexes(IndexSet(integer: lastIndex), byExtendingSelection: false)
-        if conversations.count > 1 || !conversations[0].messages.isEmpty {
+        if sessionManager.conversations.count > 1 || !sessionManager.conversations[0].messages.isEmpty {
             switchToConversation(lastIndex)
         }
 
@@ -611,8 +607,8 @@ class ChatViewController: NSViewController {
     }
 
     private func updateUsageDisplay() {
-        let total = totalPromptTokens + totalCompletionTokens
-        tokenLabel.stringValue = "⚡ \(formatNumber(totalPromptTokens)) + \(formatNumber(totalCompletionTokens)) = \(formatNumber(total)) tok"
+        let total = sessionManager.totalPromptTokens + sessionManager.totalCompletionTokens
+        tokenLabel.stringValue = "⚡ \(formatNumber(sessionManager.totalPromptTokens)) + \(formatNumber(sessionManager.totalCompletionTokens)) = \(formatNumber(total)) tok"
     }
 
 
@@ -895,47 +891,13 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
         dropTargetView.isHidden = true
     }
 
-    func saveConversations() {
-        do {
-            let data = try JSONEncoder().encode(conversations)
-            let url = URL(fileURLWithPath: savePath)
-            // 确保目录存在
-            let dir = url.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try data.write(to: url)
-        } catch {
-AppLogger.shared.log("[Error] saveConversations failed: \(error)")
-            DispatchQueue.main.async { [weak self] in
-                self?.statusLabel.stringValue = "⚠️ 保存失败"
-            }
-        }
-    }
+    func saveConversations() { sessionManager.save() }
 
-    private func loadConversations() {
-        let url = URL(fileURLWithPath: savePath)
-        guard FileManager.default.fileExists(atPath: savePath) else {
-AppLogger.shared.log("[loadConversations] 会话文件不存在,将创建新文件: \(savePath)")
-            return
-        }
-        do {
-            let data = try Data(contentsOf: url)
-            let loaded = try JSONDecoder().decode([Conversation].self, from: data)
-            conversations = loaded
-AppLogger.shared.log("[loadConversations] 已加载 \(conversations.count) 个会话")
-        } catch let error as DecodingError {
-AppLogger.shared.log("[loadConversations] 解析会话文件失败: \(error)")
-            // 备份损坏的文件
-            let backupPath = savePath + ".backup.\(Int(Date().timeIntervalSince1970))"
-            try? FileManager.default.copyItem(atPath: savePath, toPath: backupPath)
-AppLogger.shared.log("[loadConversations] 已备份损坏文件到: \(backupPath)")
-        } catch {
-AppLogger.shared.log("[loadConversations] 读取会话文件失败: \(error)")
-        }
-    }
+    private func loadConversations() { sessionManager.load() }
 
     @objc func doubleClickConversation() {
         let row = conversationTableView.clickedRow
-        guard row >= 0, row < conversations.count else { return }
+        guard row >= 0, row < sessionManager.conversations.count else { return }
         let view = conversationTableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? NSTableCellView
         guard let cell = view?.textField else { return }
         cell.isEditable = true
@@ -944,13 +906,11 @@ AppLogger.shared.log("[loadConversations] 读取会话文件失败: \(error)")
     }
 
     @objc func newConversation() {
-        let conv = Conversation(title: "💬 新对话 \(conversations.count + 1)")
-        conversations.append(conv)
+        sessionManager.newConversation()
         conversationTableView.reloadData()
-        let newIndex = conversations.count - 1
+        let newIndex = sessionManager.conversations.count - 1
         conversationTableView.selectRowIndexes(IndexSet(integer: newIndex), byExtendingSelection: false)
         switchToConversation(newIndex)
-        saveConversations()
     }
 
     @objc func showSettings() {
@@ -1270,9 +1230,9 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段")
             case "response.output_text.delta":
                 if let content = json["delta"] as? String {
                     self.js("apd('\(self.escJS(content))')")
-                    self.streamCharCount += content.count
-                    let liveTotal = self.totalPromptTokens + self.totalCompletionTokens + self.streamCharCount / 3
-                    self.tokenLabel.stringValue = "⚡ \(formatNumber(self.totalPromptTokens)) + \(formatNumber(self.totalCompletionTokens + self.streamCharCount / 3)) = \(formatNumber(liveTotal)) tok"
+                    self.sessionManager.streamCharCount += content.count
+                    let liveTotal = self.sessionManager.totalPromptTokens + self.sessionManager.totalCompletionTokens + self.sessionManager.streamCharCount / 3
+                    self.tokenLabel.stringValue = "⚡ \(formatNumber(self.sessionManager.totalPromptTokens)) + \(formatNumber(self.sessionManager.totalCompletionTokens + self.sessionManager.streamCharCount / 3)) = \(formatNumber(liveTotal)) tok"
                     self.setStatusAdvanced("📝 生成回复...", priority: .generating, color: .systemGreen, alpha: 0.40)
                     self.showStepIndicator(icon: "📝", text: "正在生成回复...", progress: 75)
                     self.stopStatusIconAnimation()
@@ -1318,10 +1278,10 @@ AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
             case "response.completed":
                 if let resp = json["response"] as? [String: Any], let usage = resp["usage"] as? [String: Any] {
                     if let inputTokens = usage["input_tokens"] as? Int {
-                        self.totalPromptTokens = inputTokens
+                        self.sessionManager.totalPromptTokens = inputTokens
                     }
                     if let outputTokens = usage["output_tokens"] as? Int {
-                        self.totalCompletionTokens = outputTokens
+                        self.sessionManager.totalCompletionTokens = outputTokens
                     }
                     self.updateUsageDisplay()
                 }
@@ -1377,13 +1337,13 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
                 }
                 if let t = r as? String, !t.isEmpty {
                     self.currentMessages.append(["role": "assistant", "content": t])
-                    let compTok = max(1, self.streamCharCount / 3)
+                    let compTok = max(1, self.sessionManager.streamCharCount / 3)
                     let promptTok = max(1, (self.currentMessages.filter { $0["role"] == "user" }.last?["content"] ?? "").count / 3)
-                    self.totalPromptTokens += promptTok
-                    self.totalCompletionTokens += compTok
+                    self.sessionManager.totalPromptTokens += promptTok
+                    self.sessionManager.totalCompletionTokens += compTok
                     self.updateUsageDisplay()
                 }
-                self.streamCharCount = 0
+                self.sessionManager.streamCharCount = 0
                 self.fetchBalance()
                 self.stopGenerating()
             }
@@ -1500,26 +1460,16 @@ AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
     }
 
     func switchToConversation(_ index: Int) {
-        guard !conversations.isEmpty else {
-AppLogger.shared.log("[Error] switchToConversation: 无可用会话")
-            return
-        }
-        guard conversations.indices.contains(index) else {
-AppLogger.shared.log("[Error] switchToConversation: index \(index) out of range (count: \(conversations.count))")
-            // 自动回退到第一个可用会话
-            if conversations.indices.contains(0) {
-                currentConversationIndex = 0
+        guard sessionManager.switchToConversation(index) else {
+            if sessionManager.conversations.indices.contains(0) {
+                sessionManager.currentConversationIndex = 0
                 conversationTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
             }
             return
         }
-        currentConversationIndex = index
-        totalPromptTokens = 0
-        totalCompletionTokens = 0
-        streamCharCount = 0
         updateUsageDisplay()
         // Re-render messages
-        let conv = conversations[index]
+        let conv = sessionManager.conversations[index]
         let html = chatHTML()
         webView.loadHTMLString(html, baseURL: nil)
         // Re-add all messages to webview after load
