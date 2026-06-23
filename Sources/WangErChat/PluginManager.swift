@@ -498,7 +498,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
     private func pushProjectToWebView() {
         guard let proj = projectManager.project, let webView = scriptwritingWebView else { return }
-        let json = encodeProjectToJSON(proj)
+        let json = ScriptwritingEditHandler.encodeProjectToJSON(proj)
         let js = "if(typeof window.loadProjectData==='function')window.loadProjectData(\(json));"
         webView.evaluateJavaScript(js, completionHandler: nil)
     }
@@ -787,16 +787,27 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
     }
 
     private func handleEditAction(_ action: String, body: [String: Any]) {
-        switch action {
-        case "updateHeading": handleUpdateHeading(body)
-        case "updateBlock": handleUpdateBlock(body)
-        case "insertBlock": handleInsertBlock(body)
-        case "deleteBlock": handleDeleteBlock(body)
-        case "insertBlockBefore": handleInsertBlockBefore(body)
-        case "deletePairAndFocusPrevious": handleDeletePairAndFocusPrevious(body)
-        default: break
-        }
+        guard let doc = currentDocument else { return }
+        let result = ScriptwritingEditHandler.processEdit(action: action, body: body, document: doc)
+        guard case .updated(let newDoc, let postActions) = result else { return }
+
+        currentDocument = newDoc
         setDirtyFlag(true)
+
+        for pa in postActions {
+            switch pa {
+            case .reRender:
+                renderCurrentDocument()
+            case .focusBlock(let scene, let idx):
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    self?.focusBlock(scene: scene, blockIndex: idx)
+                }
+            case .focusBlockChipSelected(let scene, let idx):
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    self?.focusBlockChipSelected(scene: scene, blockIndex: idx)
+                }
+            }
+        }
     }
 
     private func handleProjectAction(_ action: String, body: [String: Any]) {
@@ -818,7 +829,6 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
         case "addCharacter":
             if let name = body["name"] as? String {
                 mgr.addCharacter(name: name, avatar: body["avatar"] as? String, tagline: body["tagline"] as? String, bio: body["bio"] as? String)
-                // 自动保存 swsproj 并推回 JS 刷新侧栏
                 try? mgr.save()
                 pushProjectToWebView()
             }
@@ -828,173 +838,6 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
             }
         case "requestSync": pushProjectToWebView()
         default: break
-        }
-    }
-
-    private func handleUpdateHeading(_ body: [String: Any]) {
-        guard let sceneNum = body["scene"] as? String,
-              let field = body["field"] as? String,
-              let value = body["value"] as? String,
-              let doc = currentDocument else { return }
-
-        // Find the scene index
-        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
-        var scene = doc.scenes[sceneIdx]
-        guard var heading = scene.heading else { return }
-
-        switch field {
-        case "interiorExterior": heading = SWSSceneHeading(number: heading.number, interiorExterior: value.isEmpty ? nil : value, location: heading.location, time: heading.time, separator: heading.separator)
-        case "location": heading = SWSSceneHeading(number: heading.number, interiorExterior: heading.interiorExterior, location: value.isEmpty ? nil : value, time: heading.time, separator: heading.separator)
-        case "time": heading = SWSSceneHeading(number: heading.number, interiorExterior: heading.interiorExterior, location: heading.location, time: value.isEmpty ? nil : value, separator: heading.separator)
-        default: return
-        }
-
-        scene = SWSScene(heading: heading, blocks: scene.blocks)
-        var scenes = doc.scenes
-        scenes[sceneIdx] = scene
-        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
-    }
-
-    private func handleUpdateBlock(_ body: [String: Any]) {
-        guard let sceneNum = body["scene"] as? String,
-              let blockIdx = body["blockIndex"] as? Int,
-              let type = body["type"] as? String,
-              let value = body["value"] as? String,
-              let doc = currentDocument else { return }
-
-        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
-        var scene = doc.scenes[sceneIdx]
-        guard blockIdx < scene.blocks.count else { return }
-
-        var blocks = scene.blocks
-        let block = blocks[blockIdx]
-
-        switch (type, block) {
-        case ("action", .action):
-            blocks[blockIdx] = .action(SWSActionBlock(text: value))
-        case ("dialogue", .dialogue(let d)):
-            blocks[blockIdx] = .dialogue(SWSDialogueBlock(character: d.character, modifier: d.modifier, line: value))
-        case ("unattributed", .unattributed):
-            blocks[blockIdx] = .unattributed(SWSUnattributedBlock(lines: [value]))
-        default:
-            // Type mismatch — skip
-            return
-        }
-
-        scene = SWSScene(heading: scene.heading, blocks: blocks)
-        var scenes = doc.scenes
-        scenes[sceneIdx] = scene
-        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
-    }
-
-    private func handleInsertBlock(_ body: [String: Any]) {
-        guard let sceneNum = body["scene"] as? String,
-              let afterBlock = body["afterBlock"] as? Int,
-              let doc = currentDocument else { return }
-
-        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
-        var scene = doc.scenes[sceneIdx]
-
-        var blocks = scene.blocks
-        let insertIdx = min(afterBlock + 1, blocks.count)
-        blocks.insert(.action(SWSActionBlock(text: "")), at: insertIdx)
-
-        scene = SWSScene(heading: scene.heading, blocks: blocks)
-        var scenes = doc.scenes
-        scenes[sceneIdx] = scene
-        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
-
-        // Re-render timeline, then focus new block
-        renderCurrentDocument()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            self?.focusBlock(scene: sceneNum, blockIndex: insertIdx)
-        }
-    }
-
-    private func handleDeleteBlock(_ body: [String: Any]) {
-        guard let sceneNum = body["scene"] as? String,
-              let blockIdx = body["blockIndex"] as? Int,
-              let doc = currentDocument else { return }
-
-        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
-        var scene = doc.scenes[sceneIdx]
-        guard blockIdx < scene.blocks.count else { return }
-
-        // 场景内最后一个块：不删
-        guard scene.blocks.count > 1 else { return }
-
-        var blocks = scene.blocks
-        blocks.remove(at: blockIdx)
-
-        scene = SWSScene(heading: scene.heading, blocks: blocks)
-        var scenes = doc.scenes
-        scenes[sceneIdx] = scene
-        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
-
-        renderCurrentDocument()
-        // Focus the previous block (or new-first if head deleted)
-        let focusIdx = max(0, blockIdx - 1)
-        if focusIdx >= 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                self?.focusBlock(scene: sceneNum, blockIndex: focusIdx)
-            }
-        }
-    }
-
-    private func handleInsertBlockBefore(_ body: [String: Any]) {
-        guard let sceneNum = body["scene"] as? String,
-              let blockIdx = body["blockIndex"] as? Int,
-              let doc = currentDocument else { return }
-
-        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
-        var scene = doc.scenes[sceneIdx]
-        guard blockIdx < scene.blocks.count else { return }
-
-        var blocks = scene.blocks
-        // Insert empty action BEFORE the dialogue (at blockIdx, pushes dialogue down)
-        blocks.insert(.action(SWSActionBlock(text: "")), at: blockIdx)
-
-        scene = SWSScene(heading: scene.heading, blocks: blocks)
-        var scenes = doc.scenes
-        scenes[sceneIdx] = scene
-        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
-
-        renderCurrentDocument()
-        // Dialogue shifted to blockIdx+1, re-select chip to stay in selected state
-        let newDialogueIdx = blockIdx + 1
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            self?.focusBlockChipSelected(scene: sceneNum, blockIndex: newDialogueIdx)
-        }
-    }
-
-    private func handleDeletePairAndFocusPrevious(_ body: [String: Any]) {
-        guard let sceneNum = body["scene"] as? String,
-              let blockIdx = body["blockIndex"] as? Int,
-              let doc = currentDocument else { return }
-
-        guard let sceneIdx = doc.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return }
-        var scene = doc.scenes[sceneIdx]
-        guard blockIdx < scene.blocks.count else { return }
-
-        var blocks = scene.blocks
-        let wasOnlyBlock = blocks.count <= 1
-        if wasOnlyBlock {
-            // 场景最后一个块是 pair → 替换为空 action，保留光标落点
-            blocks[blockIdx] = .action(SWSActionBlock(text: ""))
-        } else {
-            blocks.remove(at: blockIdx)
-        }
-
-        scene = SWSScene(heading: scene.heading, blocks: blocks)
-        var scenes = doc.scenes
-        scenes[sceneIdx] = scene
-        currentDocument = SWSDocument(metadata: doc.metadata, scenes: scenes)
-
-        renderCurrentDocument()
-        // 替换为 action 则聚焦同一位置，删除则聚焦上一行
-        let focusIdx = wasOnlyBlock ? blockIdx : max(0, blockIdx - 1)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            self?.focusBlock(scene: sceneNum, blockIndex: focusIdx)
         }
     }
 
@@ -1020,50 +863,7 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
         webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
-    /// 将 SWSProject 编码为 JSON 字符串（供 JS 侧 loadProjectData 消费）
-    private func encodeProjectToJSON(_ project: SWSProject) -> String {
-        var dict: [String: Any] = [
-            "title": project.meta.title,
-            "author": project.meta.author,
-            "tree": project.resolvedTree.map { encodeTreeNode($0) },
-        ]
-        if let outline = project.outline { dict["outline"] = outline }
-        if let script = project.script { dict["script"] = script }
-        // 展开 characters 和 scenes 供 JS 直接使用
-        dict["characters"] = project.characters.map { char in
-            var c: [String: Any] = ["id": char.id, "name": char.name]
-            if let tagline = char.tagline { c["tagline"] = tagline }
-            if let bio = char.bio { c["bio"] = bio }
-            if let avatar = char.avatar { c["avatar"] = avatar }
-            if let color = char.color { c["color"] = color }
-            return c
-        }
-        dict["scenes"] = project.scenes.map { scene in
-            var s: [String: Any] = ["id": scene.id, "title": scene.title]
-            if let location = scene.location { s["location"] = location }
-            if let time = scene.time { s["time"] = time }
-            if let content = scene.content { s["content"] = content }
-            return s
-        }
-        guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
-              let json = String(data: data, encoding: .utf8) else { return "{}" }
-        return json
-    }
-
-    private func encodeTreeNode(_ node: SWSProjectTreeNode) -> [String: Any] {
-        var d: [String: Any] = [
-            "id": node.id,
-            "name": node.name,
-            "type": node.type.rawValue,
-            "icon": node.type.icon,
-        ]
-        if let ref = node.ref { d["ref"] = ref }
-        if let defaultOpen = node.defaultOpen { d["defaultOpen"] = defaultOpen }
-        if let children = node.children, !children.isEmpty {
-            d["children"] = children.map { encodeTreeNode($0) }
-        }
-        return d
-    }
+    // encodeProjectToJSON / encodeTreeNode 已移至 ScriptwritingEditHandler
 
     private func setDirtyFlag(_ dirty: Bool) {
         guard let window = findPluginWindow() else { return }
