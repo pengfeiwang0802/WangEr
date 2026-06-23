@@ -47,6 +47,7 @@
             display: flex;
             flex-direction: column;
             overflow: hidden;
+            contain: layout style;
         }
         #project-sidebar.collapsed {
             width: 0;
@@ -432,6 +433,7 @@
             opacity: 0;
             pointer-events: none;
             transition: opacity 0.2s;
+            will-change: transform, opacity;
         }
         .modal-backdrop.open {
             opacity: 1;
@@ -1234,20 +1236,23 @@
         var sidebar = document.getElementById('project-sidebar');
         if (!sidebar || !data.tree) return;
 
-        var oldList = sidebar.querySelector('.proj-tree');
-        if (oldList) oldList.remove();
-
         var header = sidebar.querySelector('.proj-sidebar-header');
         if (header) {
             header.innerHTML = '<span>📁 ' + escapeHtml(data.title || '未命名') + '</span>';
         }
 
-        var ul = document.createElement('ul');
-        ul.className = 'proj-tree';
+        // 复用已有 ul 或新建，避免 DOM replace 导致的布局问题
+        var ul = sidebar.querySelector('.proj-tree');
+        if (!ul) {
+            ul = document.createElement('ul');
+            ul.className = 'proj-tree';
+            sidebar.appendChild(ul);
+        }
+        // 清空并重建子节点
+        while (ul.firstChild) { ul.removeChild(ul.firstChild); }
         data.tree.forEach(function(node) {
             ul.appendChild(buildTreeNode(node));
         });
-        sidebar.appendChild(ul);
 
         if (sidebar.classList.contains('collapsed')) {
             sidebar.classList.remove('collapsed');
@@ -1260,6 +1265,22 @@
         if (typeof window.renderCharacterSidebar === 'function') {
             window.renderCharacterSidebar();
         }
+
+        // 验证 DOM：仅数顶层子节点（排除文件夹内嵌套的子孙节点）
+        var topRows = ul.querySelectorAll(':scope > .proj-tree-item > .proj-tree-row');
+        var cat = [];
+        for (var i = 0; i < topRows.length; i++) {
+            var r = topRows[i];
+            if (r.classList.contains('divider')) cat.push('d');
+            else if (r.classList.contains('external-script')) cat.push('e');
+            else cat.push('n');
+        }
+        window.webkit.messageHandlers.swsproj.postMessage({
+            action: 'sidebarRenderVerify',
+            expected: data.tree.length,
+            rendered: topRows.length,
+            categories: cat.join(',')
+        });
     };
 
     function buildTreeNode(node) {

@@ -285,7 +285,6 @@ final class SWSProjectManager {
             try? FileManager.default.removeItem(at: dir.appendingPathComponent(ref.path))
         }
         proj.scripts?.removeAll { $0.id == id }
-        proj.tree = proj.resolvedTree
         project = proj
         markDirty()
     }
@@ -448,7 +447,6 @@ final class SWSProjectManager {
             bio: bio
         )
         proj.characters.append(char)
-        proj.tree = proj.resolvedTree
         project = proj
         markDirty()
     }
@@ -463,7 +461,6 @@ final class SWSProjectManager {
             content: content
         )
         proj.scenes.append(scene)
-        proj.tree = proj.resolvedTree
         project = proj
         markDirty()
     }

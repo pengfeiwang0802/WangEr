@@ -41,10 +41,12 @@ enum ScriptwritingEditHandler {
     /// 将项目编码为 JSON（供 WebView 加载）。
     /// `treeOverride` 可选，用于注入包含游离文件的完整 sidebar tree。
     static func encodeProjectToJSON(_ project: SWSProject, treeOverride: [SWSProjectTreeNode]? = nil) -> String {
+        let usedTree = treeOverride ?? project.resolvedTree
+
         var dict: [String: Any] = [
             "title": project.meta.title,
             "author": project.meta.author,
-            "tree": (treeOverride ?? project.resolvedTree).map { encodeTreeNode($0) },
+            "tree": usedTree.map { encodeTreeNode($0) },
         ]
         if let outline = project.outline { dict["outline"] = outline }
         if let script = project.script { dict["script"] = script }

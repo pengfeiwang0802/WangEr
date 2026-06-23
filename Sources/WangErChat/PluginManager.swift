@@ -512,7 +512,11 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
         let json = ScriptwritingEditHandler.encodeProjectToJSON(proj, treeOverride: fullTree)
         let js = "if(typeof window.loadProjectData==='function')window.loadProjectData(\(json));"
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        webView.evaluateJavaScript(js) { result, error in
+            if let error {
+                print("[Scriptwriting] pushProjectToWebView JS error: \(error)")
+            }
+        }
     }
 
     /// 仅推送 sidebar tree 到 WebView（无项目或游离文件场景）
@@ -871,6 +875,15 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
                 handleSelectNode(type: nodeType, ref: nodeRef)
             }
         case "requestSync": pushProjectToWebView()
+        case "sidebarRenderVerify":
+            let expected = body["expected"] as? Int ?? -1
+            let rendered = body["rendered"] as? Int ?? -1
+            let categories = body["categories"] as? String ?? "?"
+            if expected != rendered {
+                print("[Scriptwriting] ⚠️ Sidebar render mismatch: expected \(expected) nodes, rendered \(rendered), cats=[\(categories)]")
+            } else {
+                print("[Scriptwriting] ✅ Sidebar render OK: \(expected) nodes, cats=[\(categories)]")
+            }
         default: break
         }
     }
