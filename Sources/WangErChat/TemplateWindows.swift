@@ -8,8 +8,10 @@ class TemplateManagerWindow: NSObject {
     static let shared = TemplateManagerWindow()
 
     var onApplyTemplate: ((FormatTemplate) -> Void)?
+    var onWillClose: (() -> Void)?
 
     private var window: NSWindow?
+    private var closeObserver: NSObjectProtocol?
     private var tableView: NSTableView!
     private var scrollView: NSScrollView!
     private var applyButton: NSButton!
@@ -137,6 +139,19 @@ class TemplateManagerWindow: NSObject {
 
         reloadData()
         window = win
+
+        // One-shot close observer scoped to this specific window
+        closeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: win, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.onWillClose?()
+            if let obs = self.closeObserver {
+                NotificationCenter.default.removeObserver(obs)
+                self.closeObserver = nil
+            }
+        }
+
         win.makeKeyAndOrderFront(nil)
     }
 

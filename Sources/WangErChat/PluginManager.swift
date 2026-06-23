@@ -89,8 +89,6 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
     private weak var layoutToolbarItem: NSToolbarItem?
     /// 编剧助手 WKWebView 引用（供原生控件调用 JS）
     private weak var scriptwritingWebView: WKWebView?
-    /// 模板管理窗口关闭观察者
-    private var templateManagerCloseObserver: NSObjectProtocol?
     /// 项目文件管理器（.swsproj）
     private let projectManager = SWSProjectManager()
 
@@ -579,19 +577,8 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
     }
 
     @objc private func openTemplateManager(_ sender: Any?) {
-        // 关闭时刷新菜单
-        if templateManagerCloseObserver == nil {
-            templateManagerCloseObserver = NotificationCenter.default.addObserver(
-                forName: NSWindow.willCloseNotification, object: nil, queue: .main
-            ) { [weak self] notification in
-                guard let self, let win = notification.object as? NSWindow,
-                      win.title == "📋 模板管理" else { return }
-                self.refreshLayoutMenu()
-                if let obs = self.templateManagerCloseObserver {
-                    NotificationCenter.default.removeObserver(obs)
-                    self.templateManagerCloseObserver = nil
-                }
-            }
+        TemplateManagerWindow.shared.onWillClose = { [weak self] in
+            self?.refreshLayoutMenu()
         }
         TemplateManagerWindow.shared.onApplyTemplate = { [weak self] template in
             let style = template.toDisplayStyle()
