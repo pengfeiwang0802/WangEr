@@ -180,6 +180,7 @@ final class SWSProjectManager {
         var scripts = proj.scripts ?? []
         scripts.append(ref)
         proj.scripts = scripts
+        proj.tree = nil  // 强制重建，避免 resolvedTree 返回缓存旧树
         proj.tree = proj.resolvedTree
         project = proj
         markDirty()
@@ -227,6 +228,7 @@ final class SWSProjectManager {
         var scripts = proj.scripts ?? []
         scripts.append(ref)
         proj.scripts = scripts
+        proj.tree = nil  // 强制重建，避免 resolvedTree 返回缓存旧树
         proj.tree = proj.resolvedTree
         project = proj
         markDirty()
@@ -311,6 +313,7 @@ final class SWSProjectManager {
             reordered.append(r)
         }
         proj.scripts = reordered
+        proj.tree = nil
         proj.tree = proj.resolvedTree
         project = proj
         markDirty()
@@ -325,6 +328,7 @@ final class SWSProjectManager {
         if let groupName { scripts[i].groupName = groupName }
         if let sceneNumbering { scripts[i].sceneNumbering = sceneNumbering }
         proj.scripts = scripts
+        proj.tree = nil
         proj.tree = proj.resolvedTree
         project = proj
         markDirty()
@@ -478,6 +482,7 @@ final class SWSProjectManager {
 
     func rebuildTree() {
         guard var proj = project else { return }
+        proj.tree = nil
         proj.tree = proj.resolvedTree
         project = proj
         markDirty()
