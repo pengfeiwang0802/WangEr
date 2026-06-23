@@ -66,20 +66,7 @@ class ChatViewController: NSViewController {
     private var streamSession: StreamSession?
     private var safetyTimer: Timer?
     private var jsErrorWindow: [Bool] = []  // 滑动窗口: true=成功, false=失败; 最近20次, ≥5失败触发reload
-    private var streamedTextBuffer = ""  // 流式文本累积,消除 finalize 时对 DOM 的依赖
-
-    /// 当前活跃的工具调用链(用于显示嵌套工具调用)
-    private var activeToolStack: [String] = []
-
-    // MARK: - 方案1&3: 增强状态管理
-    /// 状态优先级(数字越大优先级越高)
-    private enum StatusPriority: Int {
-        case ready = 0
-        case generating = 1
-        case thinking = 2
-        case toolCall = 3
-        case reasoning = 4
-    }
+    let responseEventHandler = ResponseEventHandler()  // SSE 事件处理(流式文本累积+状态转换)
 
     /// 当前状态优先级(用于延迟覆盖逻辑)
     private var currentStatusPriority: StatusPriority = .ready
@@ -94,10 +81,6 @@ class ChatViewController: NSViewController {
     private var statusIconTimer: Timer?
     /// 当前状态图标索引
     private var statusIconIndex: Int = 0
-    /// 思考图标序列
-    private let thinkingIcons = ["🤔", "🧠", "💭", "🤔", "🧠", "💭"]
-    /// 工具调用图标序列
-    private let toolIcons = ["🔧", "⚙️", "🔨", "🔧", "⚙️", "🔨"]
 
     // MARK: - 方案2: 步骤指示器
     /// 步骤指示器容器
@@ -157,6 +140,7 @@ class ChatViewController: NSViewController {
         }
 
         avatarManager.setup()
+        responseEventHandler.delegate = self
     }
 
     // MARK: - 主布局
@@ -929,7 +913,7 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
     }
 
     private func sendStreamToGateway(_ text: String) {
-        streamedTextBuffer = ""  // 新请求前清空累积缓冲
+        responseEventHandler.reset()  // 新请求前清空累积缓冲
         guard !text.isEmpty else {
             statusLabel.stringValue = "⚠️ 消息不能为空"
             return
@@ -962,7 +946,7 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
     }
 
     private func stopGenerating() {
-        streamedTextBuffer = ""
+        responseEventHandler.reset()
         sessionManager.streamCharCount = 0
         isGenerating = false; isFinalizing = false; sendButton.isHidden = false; stopButton.isHidden = true
         // 方案1&3: 使用增强状态系统
@@ -1015,7 +999,7 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
 
 }
 
-// MARK: - SSE 事件处理 (URLSession 委托已移至 StreamSession)
+// MARK: - SSE 事件处理（委托给 ResponseEventHandler）
 extension ChatViewController {
 
     /// 设置状态栏颜色
@@ -1028,175 +1012,6 @@ extension ChatViewController {
         statusBar.layer?.backgroundColor = nil
     }
 
-    /// 线程安全的 activeToolStack 操作
-    private func pushTool(_ name: String) {
-        activeToolStack.append(name)
-    }
-
-    private func popTool() {
-        if !activeToolStack.isEmpty {
-            activeToolStack.removeLast()
-        }
-    }
-
-    private func resetToolStack() {
-        activeToolStack = []
-    }
-
-    /// 安全设置状态文本
-    private func setStatus(_ text: String) {
-        // 直接赋值
-        statusLabel.stringValue = text
-        statusLabel.needsDisplay = true
-    }
-
-    /// 处理已解析的 SSE 事件（从 StreamSession 回调,已在主线程）
-    private func processResponsesEvent(event: String, json: [String: Any]) {
-        guard let type = json["type"] as? String else {
-AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段")
-            return
-        }
-
-            // 方案1&3: 使用增强状态系统
-            switch type {
-            case "response.created":
-                self.resetToolStack()
-                self.setStatusAdvanced("🤖 启动...", priority: .thinking, color: .systemBlue, alpha: 0.30)
-                self.showStepIndicator(icon: "🚀", text: "正在启动请求...", progress: 10)
-
-            case "response.in_progress":
-                self.setStatusAdvanced("🤖 思考中...", priority: .thinking, color: .systemBlue, alpha: 0.35)
-                self.showStepIndicator(icon: "🤔", text: "正在思考...", progress: 30)
-                self.startStatusIconAnimation(icons: self.thinkingIcons)
-
-            case "response.output_item.added":
-                if let item = json["item"] as? [String: Any], item["type"] as? String == "function_call" {
-                    let name = item["name"] as? String ?? ""
-                    let args = item["arguments"] as? [String: Any]
-                    let friendlyName = friendlyToolName(name)
-                    let summary = toolArgsSummary(args)
-                    self.pushTool(name)
-
-                    let statusText: String
-                    if !summary.isEmpty {
-                        statusText = "🔧 \(friendlyName): \(summary)"
-                    } else {
-                        statusText = "🔧 调用工具: \(friendlyName)"
-                    }
-                    self.setStatusAdvanced(statusText, priority: .toolCall, color: .systemOrange, alpha: 0.50)
-                    self.showStepIndicator(icon: "🔧", text: "正在调用 \(friendlyName)...", progress: 50)
-                    self.startStatusIconAnimation(icons: self.toolIcons)
-                } else if let item = json["item"] as? [String: Any], item["type"] as? String == "reasoning" {
-                    self.setStatusAdvanced("🧠 深度思考...", priority: .reasoning, color: .systemPurple, alpha: 0.45)
-                    self.showStepIndicator(icon: "🧠", text: "深度推理中...", progress: 40)
-                } else {
-                    self.setStatusAdvanced("🤖 思考中...", priority: .thinking, color: .systemBlue, alpha: 0.35)
-                    self.showStepIndicator(icon: "🤔", text: "正在思考...", progress: 30)
-                }
-
-            case "response.content_part.added":
-                if let part = json["part"] as? [String: Any], part["type"] as? String == "text" {
-                    self.setStatusAdvanced("✍️ 准备输出...", priority: .generating, color: .systemGreen, alpha: 0.35)
-                    self.showStepIndicator(icon: "✍️", text: "准备输出内容...", progress: 60)
-                }
-
-            case "response.function_call_arguments.delta":
-                if let delta = json["delta"] as? String, !delta.isEmpty {
-                    self.setStatusAdvanced("🔧 参数输入中...", priority: .toolCall, color: .systemOrange, alpha: 0.50)
-                }
-
-            case "response.function_call_arguments.done":
-                if let name = json["name"] as? String {
-                    let friendlyName = friendlyToolName(name)
-                    self.setStatusAdvanced("✅ 参数就绪: \(friendlyName)", priority: .toolCall, color: .systemOrange, alpha: 0.35)
-                }
-
-            case "response.reasoning_text.delta":
-                self.setStatusAdvanced("🧠 深度思考...", priority: .reasoning, color: .systemPurple, alpha: 0.50)
-                self.showStepIndicator(icon: "🧠", text: "深度推理中...", progress: 40)
-
-            case "response.reasoning_summary_text.delta":
-                self.setStatusAdvanced("🧠 推理总结中...", priority: .reasoning, color: .systemPurple, alpha: 0.40)
-
-            case "response.output_text.delta":
-                if let content = json["delta"] as? String {
-                    self.js("apd('\(content.escapedForJS)')")
-                    self.streamedTextBuffer += content
-                    self.sessionManager.streamCharCount += content.count
-                    let liveTotal = self.sessionManager.totalPromptTokens + self.sessionManager.totalCompletionTokens + self.sessionManager.streamCharCount / 3
-                    self.tokenLabel.stringValue = "⚡ \(formatNumber(self.sessionManager.totalPromptTokens)) + \(formatNumber(self.sessionManager.totalCompletionTokens + self.sessionManager.streamCharCount / 3)) = \(formatNumber(liveTotal)) tok"
-                    self.setStatusAdvanced("📝 生成回复...", priority: .generating, color: .systemGreen, alpha: 0.40)
-                    self.showStepIndicator(icon: "📝", text: "正在生成回复...", progress: 75)
-                    self.stopStatusIconAnimation()
-                } else {
-AppLogger.shared.log("[SSE Warning] output_text.delta 缺少 delta 字段")
-                }
-
-            case "response.output_text.done":
-                self.setStatusAdvanced("✅ 输出完成", priority: .generating, color: .systemGreen, alpha: 0.30)
-                self.showStepIndicator(icon: "✅", text: "回复生成完成", progress: 100)
-
-            case "response.content_part.done":
-                if let part = json["part"] as? [String: Any] {
-                    if part["type"] as? String == "function_call" {
-                        let name = part["name"] as? String ?? ""
-                        let friendlyName = friendlyToolName(name)
-                        self.setStatusAdvanced("✅ 工具完成: \(friendlyName)", priority: .toolCall, color: .systemOrange, alpha: 0.30)
-                        self.showStepIndicator(icon: "✅", text: "工具执行完成: \(friendlyName)", progress: 65)
-                    } else {
-                        self.setStatusAdvanced("✅ 内容块完成", priority: .generating, color: .systemGreen, alpha: 0.25)
-                    }
-                }
-
-            case "response.output_item.done":
-                if let item = json["item"] as? [String: Any] {
-                    if item["type"] as? String == "function_call" {
-                        let name = item["name"] as? String ?? ""
-                        let friendlyName = friendlyToolName(name)
-                        self.popTool()
-                        let remaining = self.activeToolStack.count
-                        if remaining > 0 {
-                            self.setStatusAdvanced("🔧 等待工具返回: \(friendlyName)", priority: .toolCall, color: .systemOrange, alpha: 0.35)
-                        } else {
-                            self.setStatusAdvanced("🔧 工具已调用: \(friendlyName)", priority: .toolCall, color: .systemBlue, alpha: 0.30)
-                            self.showStepIndicator(icon: "🔧", text: "工具已调用: \(friendlyName)", progress: 55)
-                        }
-                    } else if item["type"] as? String == "reasoning" {
-                        self.setStatusAdvanced("🤖 思考完成,准备回复...", priority: .thinking, color: .systemBlue, alpha: 0.30)
-                        self.showStepIndicator(icon: "🤔", text: "思考完成,准备回复...", progress: 60)
-                    }
-                }
-
-            case "response.completed":
-                if let resp = json["response"] as? [String: Any], let usage = resp["usage"] as? [String: Any] {
-                    if let inputTokens = usage["input_tokens"] as? Int {
-                        self.sessionManager.totalPromptTokens = inputTokens
-                    }
-                    if let outputTokens = usage["output_tokens"] as? Int {
-                        self.sessionManager.totalCompletionTokens = outputTokens
-                    }
-                    self.updateUsageDisplay()
-                }
-                self.setStatusForce("🤖 就绪", priority: .ready, color: .clear, alpha: 0)
-                self.hideStepIndicator()
-                self.stopStatusIconAnimation()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.finalizeAndUpdateStats() }
-
-            case "response.failed":
-                if let err = json["error"] as? [String: Any], let msg = err["message"] as? String {
-                    self.js("addMessage('assistant','❌ 错误: \(msg.escapedForJS)')")
-                }
-                self.setStatusForce("❌ 请求失败", priority: .ready, color: .systemRed, alpha: 0.35)
-                self.hideStepIndicator()
-                self.stopStatusIconAnimation()
-                DispatchQueue.main.async { self.finalizeAndUpdateStats() }
-
-            default:
-AppLogger.shared.log("[SSE] 未处理事件类型: \(type)")
-                break
-        }
-    }
-
     private func finalizeAndUpdateStats() {
         // 幂等锁:防止重复调用(response.completed + [DONE] 双重触发)
         guard !isFinalizing else { return }
@@ -1205,9 +1020,9 @@ AppLogger.shared.log("[SSE] 未处理事件类型: \(type)")
         // 停止 typing 动画 + 标记流式消息完成
         js("fin()")
 
-        let text = streamedTextBuffer
-        streamedTextBuffer = ""
-        let charCount = sessionManager.streamCharCount
+        let text = responseEventHandler.streamedTextBuffer
+        responseEventHandler.streamedTextBuffer = ""
+        let charCount = responseEventHandler.streamCharCount
         sessionManager.streamCharCount = 0
 
         if !text.isEmpty {
@@ -1388,7 +1203,7 @@ AppLogger.shared.log("[Warning] Message \(msgIndex) has empty content, skipping"
 // MARK: - StreamSessionDelegate
 extension ChatViewController: StreamSessionDelegate {
     func streamSession(_ session: StreamSession, didReceiveEvent event: String, data: [String: Any]) {
-        processResponsesEvent(event: event, json: data)
+        responseEventHandler.process(event: event, json: data, sessionManager: sessionManager)
     }
 
     func streamSessionDidReceiveDone(_ session: StreamSession) {
@@ -1431,6 +1246,49 @@ extension ChatViewController: StreamSessionDelegate {
     func streamSession(_ session: StreamSession, didEncounterDecodeError message: String) {
         js("addMessage('assistant','❌ \(message.escapedForJS)')")
         finalizeAndUpdateStats()
+    }
+}
+
+// MARK: - ResponseEventHandlerDelegate
+extension ChatViewController: ResponseEventHandlerDelegate {
+    func eventHandler(_ handler: ResponseEventHandler, setStatusAdvanced text: String, priority: StatusPriority, color: NSColor, alpha: CGFloat) {
+        setStatusAdvanced(text, priority: priority, color: color, alpha: alpha)
+    }
+
+    func eventHandler(_ handler: ResponseEventHandler, setStatusForce text: String, color: NSColor, alpha: CGFloat) {
+        setStatusForce(text, priority: .ready, color: color, alpha: alpha)
+    }
+
+    func eventHandler(_ handler: ResponseEventHandler, showStep icon: String, text: String, progress: Double) {
+        showStepIndicator(icon: icon, text: text, progress: progress)
+    }
+
+    func eventHandler(_ handler: ResponseEventHandler, hideStep: Void) {
+        hideStepIndicator()
+    }
+
+    func eventHandler(_ handler: ResponseEventHandler, animateIcons: [String]) {
+        startStatusIconAnimation(icons: animateIcons)
+    }
+
+    func eventHandler(_ handler: ResponseEventHandler, stopAnimation: Void) {
+        stopStatusIconAnimation()
+    }
+
+    func eventHandler(_ handler: ResponseEventHandler, executeJS: String) {
+        js(executeJS)
+    }
+
+    func eventHandler(_ handler: ResponseEventHandler, updateLiveTokenDisplay input: Int, output: Int, streamCharCount: Int) {
+        let compTok = output + streamCharCount / 3
+        let total = input + compTok
+        tokenLabel.stringValue = "⚡ \(formatNumber(input)) + \(formatNumber(compTok)) = \(formatNumber(total)) tok"
+    }
+
+    func eventHandler(_ handler: ResponseEventHandler, finalizeStream: Void) {
+        if !isFinalizing {
+            finalizeAndUpdateStats()
+        }
     }
 }
 
