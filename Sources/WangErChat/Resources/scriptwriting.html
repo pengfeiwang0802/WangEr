@@ -114,6 +114,33 @@
             overflow: hidden;
             text-overflow: ellipsis;
         }
+
+        /* 游离文件分隔条 */
+        .proj-tree-row.divider {
+            cursor: default;
+            padding: 8px 14px 3px;
+            font-size: 0.7em;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            color: var(--text-muted);
+            background: transparent;
+            border-bottom: 1px solid var(--border);
+            margin: 2px 8px 4px;
+            border-radius: 0;
+        }
+        .proj-tree-row.divider:hover {
+            background: transparent;
+        }
+
+        /* 游离文件行 */
+        .proj-tree-row.external-script .proj-tree-name {
+            color: var(--text-muted);
+            font-style: italic;
+        }
+        .proj-tree-row.external-script:hover .proj-tree-name {
+            color: var(--text-secondary);
+        }
         .proj-tree-children {
             list-style: none;
             padding-left: 12px;
@@ -1244,19 +1271,30 @@
 
         var row = document.createElement('div');
         row.className = 'proj-tree-row';
-        row.innerHTML = '<span class="proj-tree-icon">' + (node.icon || '📄') + '</span><span class="proj-tree-name">' + escapeHtml(node.name) + '</span>';
 
-        row.addEventListener('click', function(e) {
-            e.stopPropagation();
-            document.querySelectorAll('.proj-tree-row.active').forEach(function(r) { r.classList.remove('active'); });
-            row.classList.add('active');
-            window.webkit.messageHandlers.swsproj.postMessage({
-                action: 'selectNode',
-                nodeId: node.id,
-                nodeType: node.type,
-                nodeRef: node.ref || null
+        // 分隔条：不可点击，纯装饰
+        if (node.type === 'divider') {
+            row.classList.add('divider');
+            row.textContent = node.name;
+        } else {
+            // 游离文件：特定样式
+            if (node.type === 'externalScript') {
+                row.classList.add('external-script');
+            }
+            row.innerHTML = '<span class="proj-tree-icon">' + (node.icon || '📄') + '</span><span class="proj-tree-name">' + escapeHtml(node.name) + '</span>';
+
+            row.addEventListener('click', function(e) {
+                e.stopPropagation();
+                document.querySelectorAll('.proj-tree-row.active').forEach(function(r) { r.classList.remove('active'); });
+                row.classList.add('active');
+                window.webkit.messageHandlers.swsproj.postMessage({
+                    action: 'selectNode',
+                    nodeId: node.id,
+                    nodeType: node.type,
+                    nodeRef: node.ref || null
+                });
             });
-        });
+        }
 
         li.appendChild(row);
 

@@ -177,6 +177,9 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
             renderCurrentDocument()
 
+            // 刷新 sidebar（项目内文件 vs 游离文件）
+            pushSidebarToWebView()
+
             // 加载后清除所有红色验证标记
             if let window = findPluginWindow(),
                let webView = findWebView(in: window) {
@@ -424,14 +427,16 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
     @objc func newSWSProject(_ sender: Any?) {
         let panel = NSSavePanel()
         panel.title = "新建编剧项目"
-        panel.nameFieldStringValue = "未命名.swsproj"
+        panel.nameFieldStringValue = "未命名"
         panel.prompt = "创建"
-        panel.allowedContentTypes = [UTType(filenameExtension: "swsproj") ?? .json]
+        panel.message = "选择一个位置，将创建以项目名命名的文件夹。\n文件夹内包含 .swsproj 项目文件和初始剧本。"
 
         guard let window = findPluginWindow() else { return }
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
-            let title = url.deletingPathExtension().lastPathComponent
+            // url 是用户指定的路径（如 /Users/xxx/Documents/我的电影）
+            // createProject 会在此路径创建文件夹
+            let title = url.lastPathComponent
             do {
                 try self.projectManager.createProject(at: url, title: title)
                 self.pushProjectToWebView()
@@ -494,11 +499,48 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
     // MARK: - 推送项目到 WebView
 
+    /// 推送项目数据到 WebView（含 sidebar tree，自动包含游离文件）
     private func pushProjectToWebView() {
         guard let proj = projectManager.project, let webView = scriptwritingWebView else { return }
-        let json = ScriptwritingEditHandler.encodeProjectToJSON(proj)
+
+        // 构建完整 sidebar tree（含游离文件）
+        var externalURLs: [URL] = []
+        if let currentURL = currentFileURL, !projectManager.isScriptInProject(currentURL) {
+            externalURLs.append(currentURL)
+        }
+        let fullTree = projectManager.sidebarTree(externalScripts: externalURLs)
+
+        let json = ScriptwritingEditHandler.encodeProjectToJSON(proj, treeOverride: fullTree)
         let js = "if(typeof window.loadProjectData==='function')window.loadProjectData(\(json));"
         webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    /// 仅推送 sidebar tree 到 WebView（无项目或游离文件场景）
+    private func pushSidebarToWebView() {
+        guard let webView = scriptwritingWebView else { return }
+
+        // 收集当前打开的野生 .sws 文件
+        var externalURLs: [URL] = []
+        if let currentURL = currentFileURL {
+            if projectManager.isProjectOpen {
+                if !projectManager.isScriptInProject(currentURL) {
+                    externalURLs.append(currentURL)
+                }
+            } else {
+                externalURLs.append(currentURL)
+            }
+        }
+
+        if projectManager.isProjectOpen {
+            // 有项目：完整 project JSON + 游离文件
+            pushProjectToWebView()
+        } else {
+            // 无项目：只推 sidebar tree（虚拟项目骨架）
+            let tree = projectManager.sidebarTree(externalScripts: externalURLs)
+            let treeJSON = ScriptwritingEditHandler.encodeSidebarTree(tree)
+            let js = "if(typeof window.loadProjectData==='function')window.loadProjectData(\(treeJSON));"
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
     }
 
     private func showAlert(_ message: String) {
@@ -823,8 +865,40 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
             if let title = body["title"] as? String {
                 mgr.addScene(title: title, location: body["location"] as? String, time: body["time"] as? String, content: body["content"] as? String)
             }
+        case "selectNode":
+            if let nodeType = body["nodeType"] as? String,
+               let nodeRef = body["nodeRef"] as? String {
+                handleSelectNode(type: nodeType, ref: nodeRef)
+            }
         case "requestSync": pushProjectToWebView()
         default: break
+        }
+    }
+
+    private func handleSelectNode(type: String, ref: String) {
+        switch type {
+        case "script":
+            guard let proj = projectManager.project else { return }
+            guard let scriptRef = proj.scriptRef(id: ref) else { return }
+            do {
+                let doc = try projectManager.loadScript(ref: scriptRef)
+                let dir = projectManager.projectDir
+                let swsURL = dir?.appendingPathComponent(scriptRef.path) ?? URL(fileURLWithPath: "/")
+                currentFileURL = swsURL
+                currentDocument = doc
+                renderCurrentDocument()
+            } catch {
+                print("ScriptwritingPlugin: 加载项目脚本失败 \(error)")
+            }
+        case "externalScript":
+            let url = URL(fileURLWithPath: ref)
+            guard FileManager.default.fileExists(atPath: ref) else {
+                showAlert("文件不存在：\(ref)")
+                return
+            }
+            loadSWSFile(url: url)
+        default:
+            break
         }
     }
 

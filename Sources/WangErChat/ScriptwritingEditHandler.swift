@@ -38,11 +38,13 @@ enum ScriptwritingEditHandler {
 
     // MARK: - Project 序列化
 
-    static func encodeProjectToJSON(_ project: SWSProject) -> String {
+    /// 将项目编码为 JSON（供 WebView 加载）。
+    /// `treeOverride` 可选，用于注入包含游离文件的完整 sidebar tree。
+    static func encodeProjectToJSON(_ project: SWSProject, treeOverride: [SWSProjectTreeNode]? = nil) -> String {
         var dict: [String: Any] = [
             "title": project.meta.title,
             "author": project.meta.author,
-            "tree": project.resolvedTree.map { encodeTreeNode($0) },
+            "tree": (treeOverride ?? project.resolvedTree).map { encodeTreeNode($0) },
         ]
         if let outline = project.outline { dict["outline"] = outline }
         if let script = project.script { dict["script"] = script }
@@ -61,6 +63,16 @@ enum ScriptwritingEditHandler {
             if let content = scene.content { s["content"] = content }
             return s
         }
+        guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
+              let json = String(data: data, encoding: .utf8) else { return "{}" }
+        return json
+    }
+
+    /// 仅编码 sidebar tree（无项目骨架时的最小 JSON）
+    static func encodeSidebarTree(_ tree: [SWSProjectTreeNode]) -> String {
+        let dict: [String: Any] = [
+            "tree": tree.map { encodeTreeNode($0) },
+        ]
         guard let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
               let json = String(data: data, encoding: .utf8) else { return "{}" }
         return json
