@@ -66,7 +66,7 @@ class ChatViewController: NSViewController {
     private var streamSession: StreamSession?
     private var safetyTimer: Timer?
     private var jsErrorCount = 0  // JS 连续异常计数,超阈值触发 WebView 重新加载
-
+    private var streamedTextBuffer = ""  // 流式文本累积,消除 finalize 时对 DOM 的依赖
 
     /// 当前活跃的工具调用链(用于显示嵌套工具调用)
     private var activeToolStack: [String] = []
@@ -929,6 +929,7 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
     }
 
     private func sendStreamToGateway(_ text: String) {
+        streamedTextBuffer = ""  // 新请求前清空累积缓冲
         guard !text.isEmpty else {
             statusLabel.stringValue = "⚠️ 消息不能为空"
             return
@@ -961,6 +962,8 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
     }
 
     private func stopGenerating() {
+        streamedTextBuffer = ""
+        sessionManager.streamCharCount = 0
         isGenerating = false; isFinalizing = false; sendButton.isHidden = false; stopButton.isHidden = true
         // 方案1&3: 使用增强状态系统
         setStatusForce("🤖 就绪", priority: .ready)
@@ -1108,6 +1111,7 @@ AppLogger.shared.log("[SSE Warning] 事件缺少 type 字段")
             case "response.output_text.delta":
                 if let content = json["delta"] as? String {
                     self.js("apd('\(content.escapedForJS)')")
+                    self.streamedTextBuffer += content
                     self.sessionManager.streamCharCount += content.count
                     let liveTotal = self.sessionManager.totalPromptTokens + self.sessionManager.totalCompletionTokens + self.sessionManager.streamCharCount / 3
                     self.tokenLabel.stringValue = "⚡ \(formatNumber(self.sessionManager.totalPromptTokens)) + \(formatNumber(self.sessionManager.totalCompletionTokens + self.sessionManager.streamCharCount / 3)) = \(formatNumber(liveTotal)) tok"
@@ -1188,44 +1192,24 @@ AppLogger.shared.log("[SSE] 未处理事件类型: \(type)")
         guard !isFinalizing else { return }
         isFinalizing = true
 
-        // 先停止 typing 动画
-        js("rt()")
+        // 停止 typing 动画 + 标记流式消息完成
+        js("fin()")
 
-        let getJS = """
-            (function(){
-                var e=document.getElementById('s');
-                if(!e)return '';
-                var p=e.querySelector('p');
-                if(!p)return '';
-                var t=p.textContent;
-                e.id='';
-                var ti=e.querySelector('.time');
-                if(ti)ti.textContent=new Date().toLocaleTimeString();
-                return t;
-            })()
-            """
+        let text = streamedTextBuffer
+        streamedTextBuffer = ""
+        let charCount = sessionManager.streamCharCount
+        sessionManager.streamCharCount = 0
 
-        // 使用弱引用避免循环引用,延迟执行避免 JS race condition
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            guard let self = self else { return }
-            self.webView.evaluateJavaScript(getJS) { [weak self] r, error in
-                guard let self = self else { return }
-                if let error = error {
-AppLogger.shared.log("[finalize] JS 执行错误: \(error)")
-                }
-                if let t = r as? String, !t.isEmpty {
-                    self.currentMessages.append(["role": "assistant", "content": t])
-                    let compTok = max(1, self.sessionManager.streamCharCount / 3)
-                    let promptTok = max(1, (self.currentMessages.filter { $0["role"] == "user" }.last?["content"] ?? "").count / 3)
-                    self.sessionManager.totalPromptTokens += promptTok
-                    self.sessionManager.totalCompletionTokens += compTok
-                    self.updateUsageDisplay()
-                }
-                self.sessionManager.streamCharCount = 0
-                self.fetchBalance()
-                self.stopGenerating()
-            }
+        if !text.isEmpty {
+            currentMessages.append(["role": "assistant", "content": text])
+            let compTok = max(1, charCount / 3)
+            let promptTok = max(1, (currentMessages.filter { $0["role"] == "user" }.last?["content"] ?? "").count / 3)
+            sessionManager.totalPromptTokens += promptTok
+            sessionManager.totalCompletionTokens += compTok
+            updateUsageDisplay()
         }
+        fetchBalance()
+        stopGenerating()
     }
 
     // MARK: - 文件发送

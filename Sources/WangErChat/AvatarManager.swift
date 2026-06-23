@@ -63,13 +63,6 @@ class AvatarManager: NSObject {
                     AppLogger.shared.log("[Avatar] JS 执行错误: \(error.localizedDescription)")
                 } else {
                     AppLogger.shared.log("[Avatar] JS 执行成功, setExpression('\(expr)')")
-                    // 验证 SVG 状态
-                    self.webView?.evaluateJavaScript("document.getElementById('eyes')?.querySelector('ellipse')?.getAttribute('fill') ?? 'NOT_FOUND'") { eyes, _ in
-                        AppLogger.shared.log("[Avatar] 验证 - eyes fill: \(eyes ?? "nil")")
-                    }
-                    self.webView?.evaluateJavaScript("document.getElementById('mouth')?.getAttribute('d') ?? 'NOT_FOUND'") { mouth, _ in
-                        AppLogger.shared.log("[Avatar] 验证 - mouth path: \(mouth ?? "nil")")
-                    }
                 }
             }
         }
@@ -122,13 +115,6 @@ extension AvatarManager: WKNavigationDelegate {
         guard webView == self.webView else { return }
         isReady = true
         AppLogger.shared.log("[Avatar] avatarDidLoad — WKWebView 加载完成")
-        // 验证 SVG 结构
-        webView.evaluateJavaScript("document.getElementById('eyes')?.getAttribute('d') ?? 'NOT_FOUND'") { eyes, _ in
-            AppLogger.shared.log("[Avatar] 初始 - eyes path: \(eyes ?? "nil")")
-        }
-        webView.evaluateJavaScript("document.getElementById('mouth')?.getAttribute('d') ?? 'NOT_FOUND'") { mouth, _ in
-            AppLogger.shared.log("[Avatar] 初始 - mouth path: \(mouth ?? "nil")")
-        }
         // 设置默认表情
         webView.evaluateJavaScript("setExpression('neutral')")
     }
