@@ -24,6 +24,15 @@ enum ScriptwritingEditHandler {
 
     // MARK: - Edit 消息分发
 
+    static let editActions: Set<String> = [
+        "updateHeading", "updateBlock", "insertBlock",
+        "deleteBlock", "insertBlockBefore", "deletePairAndFocusPrevious"
+    ]
+
+    static func isEditAction(_ action: String) -> Bool {
+        return editActions.contains(action)
+    }
+
     static func processEdit(action: String, body: [String: Any], document: SWSDocument) -> ScriptwritingEditResult {
         switch action {
         case "updateHeading": return applyUpdateHeading(body, document: document)

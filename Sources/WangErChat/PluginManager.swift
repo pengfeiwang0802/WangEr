@@ -91,6 +91,8 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
     private weak var scriptwritingWebView: WKWebView?
     /// 项目文件管理器（.swsproj）
     private let projectManager = SWSProjectManager()
+    /// Bridge ID counter
+    private var bridgeIdCounter: Int = 0
 
     func createWindow() -> NSWindow {
         let window = NSWindow(
@@ -123,8 +125,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         // 先加载默认空布局
         webView.navigationDelegate = self
         // 注册 JS → Swift 消息通道
-        webView.configuration.userContentController.add(self, name: "edit")
-        webView.configuration.userContentController.add(self, name: "swsproj")
+        webView.configuration.userContentController.add(self, name: "bridge")
         webView.loadHTMLString(ScriptwritingLayout.html, baseURL: nil)
 
         // 工具栏（文件操作按钮）
@@ -181,10 +182,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
             pushSidebarToWebView()
 
             // 加载后清除所有红色验证标记
-            if let window = findPluginWindow(),
-               let webView = findWebView(in: window) {
-                clearInvalidMarks(webView: webView)
-            }
+            clearInvalidMarks()
         } catch {
             print("ScriptwritingPlugin: 加载文件失败 \(error)")
         }
@@ -217,7 +215,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
             print("[PluginManager] renderCurrentDocument: currentDocument is nil, skip")
             return
         }
-        guard let webView = scriptwritingWebView else {
+        guard scriptwritingWebView != nil else {
             print("[PluginManager] renderCurrentDocument: scriptwritingWebView is nil, skip")
             return
         }
@@ -236,57 +234,17 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         let authorHTML = authorMatch.flatMap { String(fullHTML[$0]) } ?? ""
 
         // 渲染到剧本预览（base64 传 HTML）
+        // 渲染剧本预览
         let previewHTML = titleHTML + authorHTML + bodyHTML
         let htmlB64 = previewHTML.data(using: .utf8)!.base64EncodedString(options: [])
         print("[PluginManager] preview: html=\(previewHTML.utf8.count/1024)KB, b64=\(htmlB64.utf8.count/1024)KB")
+        bridgeSend(action: "renderScript", payload: ["htmlB64": htmlB64])
 
-        // 使用 HTML 中定义的 b64decode（已验证可用）
-        let previewJS = """
-        (function(){
-            var el=document.getElementById('script-wrapper');
-            if(!el){console.error('[preview] script-wrapper MISSING');return;}
-            try {
-                var html=b64decode('\(htmlB64)');
-                el.innerHTML=html;
-                console.log('[preview] OK, innerHTML length='+el.innerHTML.length+' text='+el.innerText.substring(0,80));
-            } catch(e) {
-                console.error('[preview] FAIL: '+e.message);
-            }
-        })();
-        """
-        webView.evaluateJavaScript(previewJS) { result, error in
-            if let e = error {
-                print("[PluginManager] preview JS ERROR: \(e.localizedDescription)")
-            } else {
-                print("[PluginManager] preview JS callback OK, result=\(result ?? "nil")")
-            }
-        }
-
-        // 时间轴：生成 JSON → base64 → 调用 HTML 中已验证的 renderTimelineFromSWSBase64
+        // 时间轴：生成 JSON → base64 → 通过 bridge 渲染
         let timelineJSON = buildTimelineJSON(document: document, characterColors: characterColors)
         let tB64 = timelineJSON.data(using: .utf8)!.base64EncodedString(options: [])
         print("[PluginManager] timeline: json=\(timelineJSON.utf8.count/1024)KB, b64=\(tB64.utf8.count/1024)KB")
-
-        // 调用 HTML 中定义的 renderTimelineFromSWSBase64（已验证无 bug）
-        let timelineJS = "window.renderTimelineFromSWSBase64('\(tB64)');"
-        webView.evaluateJavaScript(timelineJS) { result, error in
-            if let e = error {
-                print("[PluginManager] timeline JS ERROR: \(e.localizedDescription)")
-            } else {
-                // 渲染后验证 DOM
-                let verifyJS = """
-                (function(){
-                    var el=document.getElementById('timeline-scroll');
-                    if(!el) return 'NO_TIMELINE_SCROLL';
-                    var cards=el.querySelectorAll('.scene-card');
-                    return 'cards='+cards.length;
-                })();
-                """
-                webView.evaluateJavaScript(verifyJS) { vResult, vError in
-                    print("[PluginManager] timeline verify: \(vResult ?? "nil"), error=\(vError?.localizedDescription ?? "none")")
-                }
-            }
-        }
+        bridgeSend(action: "renderTimeline", payload: ["b64": tB64, "expectedScenes": document.scenes.count])
     }
 
     /// 将 SWS 文档转为 JSON（供 JS 渲染时间轴用）
@@ -405,21 +363,31 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
     }
 
     /// 清除所有红色验证标记
-    private func clearInvalidMarks(webView: WKWebView) {
-        let js = """
-        (function() {
-            var body = document.getElementById('editor-body');
-            if (!body) return;
-            var children = body.children;
-            for (var i = 0; i < children.length; i++) {
-                var el = children[i];
-                el.style.borderLeft = '';
-                el.style.paddingLeft = '';
-                el.style.backgroundColor = '';
+    private func clearInvalidMarks() {
+        bridgeSend(action: "clearInvalidMarks")
+    }
+
+    // MARK: - Bridge Protocol
+
+    private func bridgeSend(action: String, payload: [String: Any] = [:], id: String? = nil) {
+        guard let webView = scriptwritingWebView else { return }
+        let msgId = id ?? "s2j_\(nextBridgeId())"
+        let envelope: [String: Any] = ["id": msgId, "action": action, "payload": payload]
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: envelope),
+              let jsonStr = String(data: jsonData, encoding: .utf8) else {
+            print("[Bridge] failed to serialize envelope for action: \(action)")
+            return
+        }
+        webView.evaluateJavaScript("window.__bridgeReceive(\(jsonStr))") { result, error in
+            if let e = error {
+                print("[Bridge] JS error for \(action) (\(msgId)): \(e.localizedDescription)")
             }
-        })();
-        """
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+
+    private func nextBridgeId() -> Int {
+        bridgeIdCounter += 1
+        return bridgeIdCounter
     }
 
     // MARK: - 项目文件管理（.swsproj）
@@ -501,7 +469,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
     /// 推送项目数据到 WebView（含 sidebar tree，自动包含游离文件）
     private func pushProjectToWebView() {
-        guard let proj = projectManager.project, let webView = scriptwritingWebView else { return }
+        guard let proj = projectManager.project else { return }
 
         // 构建完整 sidebar tree（含游离文件）
         var externalURLs: [URL] = []
@@ -509,20 +477,12 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
             externalURLs.append(currentURL)
         }
         let fullTree = projectManager.sidebarTree(externalScripts: externalURLs)
-
         let json = ScriptwritingEditHandler.encodeProjectToJSON(proj, treeOverride: fullTree)
-        let js = "if(typeof window.loadProjectData==='function')window.loadProjectData(\(json));"
-        webView.evaluateJavaScript(js) { result, error in
-            if let error {
-                print("[Scriptwriting] pushProjectToWebView JS error: \(error)")
-            }
-        }
+        bridgeSend(action: "loadProject", payload: ["json": json])
     }
 
     /// 仅推送 sidebar tree 到 WebView（无项目或游离文件场景）
     private func pushSidebarToWebView() {
-        guard let webView = scriptwritingWebView else { return }
-
         // 收集当前打开的野生 .sws 文件
         var externalURLs: [URL] = []
         if let currentURL = currentFileURL {
@@ -542,8 +502,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
             // 无项目：只推 sidebar tree（虚拟项目骨架）
             let tree = projectManager.sidebarTree(externalScripts: externalURLs)
             let treeJSON = ScriptwritingEditHandler.encodeSidebarTree(tree)
-            let js = "if(typeof window.loadProjectData==='function')window.loadProjectData(\(treeJSON));"
-            webView.evaluateJavaScript(js, completionHandler: nil)
+            bridgeSend(action: "loadSidebar", payload: ["json": treeJSON])
         }
     }
 
@@ -563,11 +522,6 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
     private func findPluginWindow() -> NSWindow? {
         return NSApp.windows.first(where: { $0.identifier?.rawValue == "scriptwriting" })
-    }
-
-    private func findWebView(in window: NSWindow) -> WKWebView? {
-        guard let contentView = window.contentView else { return nil }
-        return contentView.subviews.first(where: { $0 is WKWebView }) as? WKWebView
     }
 
     @objc func showLayoutMenu(_ sender: NSToolbarItem) {
@@ -806,22 +760,29 @@ enum ScriptwritingLayout {
     }()
 }
 
-// MARK: - WKScriptMessageHandler (编辑同步)
+// MARK: - WKScriptMessageHandler (bridge dispatch)
 extension ScriptwritingPlugin: WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any],
+        guard message.name == "bridge",
+              let body = message.body as? [String: Any],
               let action = body["action"] as? String else { return }
 
-        if message.name == "edit" {
-            handleEditAction(action, body: body)
-        } else if message.name == "swsproj" {
-            handleProjectAction(action, body: body)
+        let payload = body["payload"] as? [String: Any] ?? [:]
+        let msgId = body["id"] as? String ?? "?"
+
+        // 剧本编辑操作（原 edit 通道）
+        if ScriptwritingEditHandler.isEditAction(action) {
+            handleEditAction(action, payload: payload)
+            return
         }
+
+        // 项目管理操作（原 swsproj 通道）
+        handleProjectAction(action, payload: payload, msgId: msgId)
     }
 
-    private func handleEditAction(_ action: String, body: [String: Any]) {
+    private func handleEditAction(_ action: String, payload: [String: Any]) {
         guard let doc = currentDocument else { return }
-        let result = ScriptwritingEditHandler.processEdit(action: action, body: body, document: doc)
+        let result = ScriptwritingEditHandler.processEdit(action: action, body: payload, document: doc)
         guard case .updated(let newDoc, let postActions) = result else { return }
 
         currentDocument = newDoc
@@ -843,48 +804,49 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
         }
     }
 
-    private func handleProjectAction(_ action: String, body: [String: Any]) {
+    private func handleProjectAction(_ action: String, payload: [String: Any], msgId: String) {
         let mgr = projectManager
         switch action {
         case "markDirty": mgr.markDirty()
         case "updateOutline":
-            if let md = body["content"] as? String { mgr.updateOutline(md) }
+            if let md = payload["content"] as? String { mgr.updateOutline(md) }
         case "updateScript":
-            if let text = body["content"] as? String { mgr.updateScript(text) }
+            if let text = payload["content"] as? String { mgr.updateScript(text) }
         case "updateCharacter":
-            if let id = body["id"] as? String {
-                mgr.updateCharacter(id: id, name: body["name"] as? String, tagline: body["tagline"] as? String, bio: body["bio"] as? String, avatar: body["avatar"] as? String)
+            if let id = payload["id"] as? String {
+                mgr.updateCharacter(id: id, name: payload["name"] as? String, tagline: payload["tagline"] as? String, bio: payload["bio"] as? String, avatar: payload["avatar"] as? String)
             }
         case "updateScene":
-            if let id = body["id"] as? String {
-                mgr.updateScene(id: id, title: body["title"] as? String, content: body["content"] as? String, location: body["location"] as? String, time: body["time"] as? String)
+            if let id = payload["id"] as? String {
+                mgr.updateScene(id: id, title: payload["title"] as? String, content: payload["content"] as? String, location: payload["location"] as? String, time: payload["time"] as? String)
             }
         case "addCharacter":
-            if let name = body["name"] as? String {
-                mgr.addCharacter(name: name, avatar: body["avatar"] as? String, tagline: body["tagline"] as? String, bio: body["bio"] as? String)
+            if let name = payload["name"] as? String {
+                mgr.addCharacter(name: name, avatar: payload["avatar"] as? String, tagline: payload["tagline"] as? String, bio: payload["bio"] as? String)
                 try? mgr.save()
                 pushProjectToWebView()
             }
         case "addScene":
-            if let title = body["title"] as? String {
-                mgr.addScene(title: title, location: body["location"] as? String, time: body["time"] as? String, content: body["content"] as? String)
+            if let title = payload["title"] as? String {
+                mgr.addScene(title: title, location: payload["location"] as? String, time: payload["time"] as? String, content: payload["content"] as? String)
             }
         case "selectNode":
-            if let nodeType = body["nodeType"] as? String,
-               let nodeRef = body["nodeRef"] as? String {
+            if let nodeType = payload["nodeType"] as? String,
+               let nodeRef = payload["nodeRef"] as? String {
                 handleSelectNode(type: nodeType, ref: nodeRef)
             }
         case "requestSync": pushProjectToWebView()
         case "sidebarRenderVerify":
-            let expected = body["expected"] as? Int ?? -1
-            let rendered = body["rendered"] as? Int ?? -1
-            let categories = body["categories"] as? String ?? "?"
+            let expected = payload["expected"] as? Int ?? -1
+            let rendered = payload["rendered"] as? Int ?? -1
+            let categories = payload["categories"] as? String ?? "?"
             if expected != rendered {
                 print("[Scriptwriting] ⚠️ Sidebar render mismatch: expected \(expected) nodes, rendered \(rendered), cats=[\(categories)]")
             } else {
                 print("[Scriptwriting] ✅ Sidebar render OK: \(expected) nodes, cats=[\(categories)]")
             }
-        default: break
+        default:
+            print("[Bridge] unknown action: \(action), id=\(msgId)")
         }
     }
 
@@ -916,25 +878,11 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
     }
 
     private func focusBlockChipSelected(scene: String, blockIndex: Int) {
-        guard let webView = scriptwritingWebView else { return }
-        let js = """
-        (function(){
-            var w=document.querySelector('.block-wrap[data-scene=\"\(scene)\"][data-block=\"\(blockIndex)\"]');
-            if(w){w.setAttribute('data-chip-selected','');}
-        })();
-        """
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        bridgeSend(action: "focusBlockChipSelected", payload: ["scene": scene, "blockIndex": blockIndex])
     }
 
     private func focusBlock(scene: String, blockIndex: Int) {
-        guard let webView = scriptwritingWebView else { return }
-        let js = """
-        (function(){
-            var w=document.querySelector('.block-wrap[data-scene=\"\(scene)\"][data-block=\"\(blockIndex)\"]');
-            if(w){var c=w.querySelector('.tl-content');if(c){c.focus();var r=document.createRange();r.selectNodeContents(c);r.collapse(false);var s=window.getSelection();s.removeAllRanges();s.addRange(r);}}
-        })();
-        """
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        bridgeSend(action: "focusBlock", payload: ["scene": scene, "blockIndex": blockIndex])
     }
 
     // encodeProjectToJSON / encodeTreeNode 已移至 ScriptwritingEditHandler

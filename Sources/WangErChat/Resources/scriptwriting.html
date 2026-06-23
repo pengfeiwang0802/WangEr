@@ -1104,6 +1104,98 @@
 </div>
 
 <script>
+    // ============================================================
+    //  Bridge Protocol v1 — 所有 Swift ↔ JS 通信走这里
+    // ============================================================
+
+    window.__bridgeReceive = function(envelope) {
+        var id = envelope.id, action = envelope.action, payload = envelope.payload || {};
+        if (!id) { console.warn('[bridge] dropped message without id:', envelope); return; }
+
+        switch (action) {
+            case 'renderScript':    return _bridgeRenderScript(payload);
+            case 'renderTimeline':  return _bridgeRenderTimeline(payload);
+            case 'clearInvalidMarks': return _bridgeClearInvalidMarks();
+            case 'loadProject':     return _bridgeLoadProject(payload);
+            case 'loadSidebar':     return _bridgeLoadSidebar(payload);
+            case 'focusBlock':      return _bridgeFocusBlock(payload);
+            case 'focusBlockChipSelected': return _bridgeFocusBlockChipSelected(payload);
+            default:
+                console.warn('[bridge] unknown action:', action);
+        }
+    };
+
+    window.__bridgeSend = function(envelope) {
+        envelope.id = envelope.id || ('j2s_' + Date.now());
+        window.webkit.messageHandlers.bridge.postMessage(envelope);
+    };
+
+    // ── Bridge action handlers (called by __bridgeReceive) ──
+
+    function _bridgeRenderScript(payload) {
+        var el = document.getElementById('script-wrapper');
+        if (!el) { console.error('[bridge] script-wrapper MISSING'); return; }
+        try {
+            var html = b64decode(payload.htmlB64);
+            el.innerHTML = html;
+            console.log('[bridge] renderScript OK, length=' + el.innerHTML.length);
+        } catch(e) {
+            console.error('[bridge] renderScript FAIL:', e.message);
+        }
+    }
+
+    function _bridgeRenderTimeline(payload) {
+        if (typeof window.renderTimelineFromSWSBase64 === 'function') {
+            window.renderTimelineFromSWSBase64(payload.b64);
+            // verification
+            var el = document.getElementById('timeline-scroll');
+            var cards = el ? el.querySelectorAll('.scene-card').length : 0;
+            console.log('[bridge] renderTimeline done, expected=' + (payload.expectedScenes || '?') + ' cards=' + cards);
+        }
+    }
+
+    function _bridgeClearInvalidMarks() {
+        var body = document.getElementById('editor-body');
+        if (!body) return;
+        var children = body.children;
+        for (var i = 0; i < children.length; i++) {
+            var el = children[i];
+            el.style.borderLeft = '';
+            el.style.paddingLeft = '';
+            el.style.backgroundColor = '';
+        }
+    }
+
+    function _bridgeLoadProject(payload) {
+        if (typeof window.loadProjectData === 'function') {
+            window.loadProjectData(payload.json);
+        }
+    }
+
+    function _bridgeLoadSidebar(payload) {
+        if (typeof window.loadProjectData === 'function') {
+            window.loadProjectData(payload.json);
+        }
+    }
+
+    function _bridgeFocusBlock(payload) {
+        var w = document.querySelector('.block-wrap[data-scene="' + payload.scene + '"][data-block="' + payload.blockIndex + '"]');
+        if (w) {
+            var c = w.querySelector('.tl-content');
+            if (c) {
+                c.focus();
+                var r = document.createRange();
+                r.selectNodeContents(c); r.collapse(false);
+                var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+            }
+        }
+    }
+
+    function _bridgeFocusBlockChipSelected(payload) {
+        var w = document.querySelector('.block-wrap[data-scene="' + payload.scene + '"][data-block="' + payload.blockIndex + '"]');
+        if (w) { w.setAttribute('data-chip-selected', ''); }
+    }
+
     // ===== 模式切换（时间轴 / 剧本） =====
     function switchMode(mode) {
         const isTimeline = mode === 'timeline';
@@ -1221,11 +1313,13 @@
             else if (r.classList.contains('external-script')) cat.push('e');
             else cat.push('n');
         }
-        window.webkit.messageHandlers.swsproj.postMessage({
+        window.__bridgeSend({
             action: 'sidebarRenderVerify',
-            expected: data.tree.length,
-            rendered: topRows.length,
-            categories: cat.join(',')
+            payload: {
+                expected: data.tree.length,
+                rendered: topRows.length,
+                categories: cat.join(',')
+            }
         });
     };
 
@@ -1254,11 +1348,13 @@
                 e.stopPropagation();
                 document.querySelectorAll('.proj-tree-row.active').forEach(function(r) { r.classList.remove('active'); });
                 row.classList.add('active');
-                window.webkit.messageHandlers.swsproj.postMessage({
+                window.__bridgeSend({
                     action: 'selectNode',
-                    nodeId: node.id,
-                    nodeType: node.type,
-                    nodeRef: node.ref || null
+                    payload: {
+                        nodeId: node.id,
+                        nodeType: node.type,
+                        nodeRef: node.ref || null
+                    }
                 });
             });
         }
@@ -1588,9 +1684,9 @@
         var name = nameInput ? nameInput.value.trim() : '';
         if (!name) return;
         var bio = bioInput ? bioInput.value.trim() : '';
-        var payload = { action: 'addCharacter', name: name };
-        if (bio) payload.bio = bio;
-        window.webkit.messageHandlers.swsproj.postMessage(payload);
+        var pl = { name: name };
+        if (bio) pl.bio = bio;
+        window.__bridgeSend({ action: 'addCharacter', payload: pl });
         window._closeAddCharModal();
     };
 
@@ -1645,40 +1741,28 @@
     // Focusout → push edit to Swift
     document.addEventListener('focusout', function(e) {
         var el = e.target;
-        var patch = null;
         
         if (el.classList.contains('scene-field')) {
-            var field = el.dataset.field;
-            var sceneNum = el.dataset.scene;
-            var value = el.value.trim();
-            patch = {
+            window.__bridgeSend({
                 action: 'updateHeading',
-                scene: sceneNum,
-                field: field,
-                value: value
-            };
+                payload: {
+                    scene: el.dataset.scene,
+                    field: el.dataset.field,
+                    value: el.value.trim()
+                }
+            });
         } else if (el.classList.contains('tl-content')) {
             var wrap = el.closest('.block-wrap');
             if (!wrap) return;
-            var sceneNum = wrap.dataset.scene;
-            var blockIdx = parseInt(wrap.dataset.block);
-            var type = wrap.dataset.type;
-            var value = el.innerText;
-            patch = {
+            window.__bridgeSend({
                 action: 'updateBlock',
-                scene: sceneNum,
-                blockIndex: blockIdx,
-                type: type,
-                value: value
-            };
-        }
-
-        if (patch && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.edit) {
-            try {
-                window.webkit.messageHandlers.edit.postMessage(patch);
-            } catch(err) {
-                console.log('[Timeline] postMessage fail:', err);
-            }
+                payload: {
+                    scene: wrap.dataset.scene,
+                    blockIndex: parseInt(wrap.dataset.block),
+                    type: wrap.dataset.type,
+                    value: el.innerText
+                }
+            });
         }
     });
 
@@ -1717,7 +1801,7 @@
 
     // 键盘事件：chip 选中态 + Cmd+Enter 插入 / Backspace 删除
     document.addEventListener('keydown', function(e) {
-        var send = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.edit;
+        var send = window.__bridgeSend;
 
         // ── Chip 选中态优先（全局，不依赖焦点）──
         var selectedWrap = document.querySelector('.block-wrap[data-chip-selected]');
@@ -1728,14 +1812,14 @@
             if (e.key === 'Enter' && !e.metaKey) {
                 // Enter → 上方插入空 action，保持 chip 选中
                 e.preventDefault();
-                if (send) send.postMessage({ action:'insertBlockBefore', scene:selScene, blockIndex:selIdx });
+                send({ action:'insertBlockBefore', payload:{ scene:selScene, blockIndex:selIdx } });
                 return;
             }
 
             if (e.key === 'Backspace') {
                 // Backspace → 删除 pair（若为场景最后一块则替换为空 action，由 Swift 端处理）
                 e.preventDefault();
-                if (send) send.postMessage({ action:'deletePairAndFocusPrevious', scene:selScene, blockIndex:selIdx });
+                send({ action:'deletePairAndFocusPrevious', payload:{ scene:selScene, blockIndex:selIdx } });
                 return;
             }
 
@@ -1766,7 +1850,7 @@
             e.preventDefault();
             e.stopPropagation();
             el.blur();
-            if (send) send.postMessage({ action:'insertBlock', scene:sceneNum, afterBlock:blockIdx, type:'action' });
+            send({ action:'insertBlock', payload:{ scene:sceneNum, afterBlock:blockIdx, type:'action' } });
             return;
         }
 
@@ -1786,7 +1870,7 @@
             // 非最后一块：action 删 block，dialogue 不删（只在 chip 选中态删）
             if (type !== 'dialogue') {
                 el.blur();
-                if (send) send.postMessage({ action:'deleteBlock', scene:sceneNum, blockIndex:blockIdx });
+                send({ action:'deleteBlock', payload:{ scene:sceneNum, blockIndex:blockIdx } });
             }
             return;
         }
