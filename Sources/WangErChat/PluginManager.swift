@@ -124,6 +124,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
         // 先加载默认空布局
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         // 注册 JS → Swift 消息通道
         webView.configuration.userContentController.add(self, name: "bridge")
         webView.loadHTMLString(ScriptwritingLayout.html, baseURL: nil)
@@ -828,6 +829,12 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
                 try? mgr.save()
                 pushProjectToWebView()
             }
+        case "deleteCharacter":
+            if let id = payload["id"] as? String {
+                mgr.deleteCharacter(id: id)
+                try? mgr.save()
+                pushProjectToWebView()
+            }
         case "addScene":
             if let title = payload["title"] as? String {
                 mgr.addScene(title: title, location: payload["location"] as? String, time: payload["time"] as? String, content: payload["content"] as? String)
@@ -898,6 +905,24 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
             window.title = title + " \u{25CF}"
         } else if !dirty && hasDot {
             window.title = String(title.dropLast(2))
+        }
+    }
+}
+
+// MARK: - WKUIDelegate (JS alert/confirm 弹窗)
+extension ScriptwritingPlugin: WKUIDelegate {
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        guard let window = findPluginWindow() else {
+            completionHandler()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "编剧助手"
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "确定")
+        alert.beginSheetModal(for: window) { _ in
+            completionHandler()
         }
     }
 }

@@ -1107,7 +1107,7 @@
         </div>
         <div class="sidebar-footer">
             <button title="打开角色面板">📋 详情</button>
-            <button title="从剧本提取角色">🔄 提取</button>
+            <button title="删除选中角色" id="btn-delete-char">🗑 删除</button>
         </div>
     </div>
 
@@ -1837,6 +1837,37 @@
             }
             return;
         }
+        // 🗑 删除 按钮
+        if (e.target.id === 'btn-delete-char' || (e.target.closest('#btn-delete-char'))) {
+            e.stopPropagation();
+            var active = document.querySelector('#char-list .char-item.active');
+            if (!active) { alert('请先在角色列表中选中一个角色'); return; }
+            var charId = active.dataset.charId;
+            var charName = active.dataset.charName || '';
+            if (!charId) return;
+            var label = document.getElementById('delete-char-name-label');
+            if (label) label.textContent = '确认删除角色「' + charName + '」吗？';
+            document.getElementById('delete-char-id').value = charId;
+            document.getElementById('delete-char-modal').classList.add('open');
+            return;
+        }
+        // 删除确认弹窗 — 遮罩点击关闭
+        if (e.target.id === 'delete-char-modal') {
+            document.getElementById('delete-char-modal').classList.remove('open');
+            return;
+        }
+        // 删除确认弹窗 — 确认
+        if (e.target.id === 'delete-char-confirm') {
+            var delId = document.getElementById('delete-char-id').value;
+            if (delId) { window.__bridgeSend({ action: 'deleteCharacter', payload: { id: delId } }); }
+            document.getElementById('delete-char-modal').classList.remove('open');
+            return;
+        }
+        // 删除确认弹窗 — 取消
+        if (e.target.id === 'delete-char-cancel') {
+            document.getElementById('delete-char-modal').classList.remove('open');
+            return;
+        }
         // modal 遮罩点击关闭
         if (e.target.id === 'add-char-modal') {
             window._closeAddCharModal();
@@ -1855,6 +1886,11 @@
     });
 
     document.addEventListener('keydown', function(e) {
+        var delModal = document.getElementById('delete-char-modal');
+        if (delModal && delModal.classList.contains('open')) {
+            if (e.key === 'Escape') { delModal.classList.remove('open'); return; }
+            return;
+        }
         var modal = document.getElementById('add-char-modal');
         if (!modal || !modal.classList.contains('open')) return;
         if (e.key === 'Escape') { window._closeAddCharModal(); return; }
@@ -2042,6 +2078,19 @@
         <div class="modal-actions">
             <button class="btn-cancel" id="add-char-cancel">取消</button>
             <button class="btn-add" id="add-char-confirm">添加</button>
+        </div>
+    </div>
+</div>
+
+<!-- 删除角色确认弹窗 -->
+<div class="modal-backdrop" id="delete-char-modal">
+    <div class="modal-card" style="width:360px;">
+        <h3>⚠️ 删除角色</h3>
+        <p style="margin:12px 0;" id="delete-char-name-label">确认删除角色吗？</p>
+        <input type="hidden" id="delete-char-id" value="" />
+        <div class="modal-actions">
+            <button class="btn-cancel" id="delete-char-cancel">取消</button>
+            <button class="btn-add" style="background:var(--accent);" id="delete-char-confirm">删除</button>
         </div>
     </div>
 </div>

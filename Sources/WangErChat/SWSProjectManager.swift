@@ -437,6 +437,13 @@ final class SWSProjectManager {
         markDirty()
     }
 
+    func deleteCharacter(id: String) {
+        guard var proj = project else { return }
+        proj.characters.removeAll(where: { $0.id == id })
+        project = proj
+        markDirty()
+    }
+
     func addCharacter(name: String, avatar: String? = nil, tagline: String? = nil, bio: String? = nil) {
         guard var proj = project else { return }
         let char = SWSProjectCharacter(
