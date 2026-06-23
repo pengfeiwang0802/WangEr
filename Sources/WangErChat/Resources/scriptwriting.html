@@ -148,6 +148,62 @@
             margin: 0;
         }
 
+        /* + 按钮（项目树文件夹右侧，hover 时显示） */
+        .proj-tree-add-btn {
+            display: none;
+            margin-left: auto;
+            width: 18px;
+            height: 18px;
+            line-height: 16px;
+            text-align: center;
+            border: none;
+            background: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 16px;
+            border-radius: 3px;
+            flex-shrink: 0;
+        }
+        .proj-tree-row:hover .proj-tree-add-btn {
+            display: inline-block;
+        }
+        .proj-tree-add-btn:hover {
+            background: var(--accent-soft);
+            color: var(--accent);
+        }
+
+        /* 上下文菜单 */
+        .proj-tree-context-menu {
+            position: fixed;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.45);
+            z-index: 9999;
+            min-width: 150px;
+            padding: 4px 0;
+        }
+        .proj-tree-context-item {
+            padding: 7px 14px;
+            cursor: pointer;
+            font-size: 13px;
+            color: var(--text-primary);
+            white-space: nowrap;
+            transition: background 0.1s;
+        }
+        .proj-tree-context-item:hover {
+            background: var(--accent);
+            color: #fff;
+        }
+        .proj-tree-context-item.disabled {
+            color: var(--text-muted);
+            cursor: default;
+        }
+        .proj-tree-context-item.disabled:hover {
+            background: transparent;
+            color: var(--text-muted);
+        }
+
         #main-wrapper {
             flex: 1;
             display: flex;
@@ -1385,6 +1441,19 @@
             }
             row.innerHTML = '<span class="proj-tree-icon">' + (node.icon || '📄') + '</span><span class="proj-tree-name">' + escapeHtml(node.name) + '</span>';
 
+            // 文件夹节点：右侧显示 + 按钮
+            if (node.type === 'folder') {
+                var addBtn = document.createElement('button');
+                addBtn.className = 'proj-tree-add-btn';
+                addBtn.title = '添加';
+                addBtn.textContent = '+';
+                addBtn.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    showFolderAddMenu(e, node, addBtn);
+                });
+                row.appendChild(addBtn);
+            }
+
             row.addEventListener('click', function(e) {
                 e.stopPropagation();
                 document.querySelectorAll('.proj-tree-row.active').forEach(function(r) { r.classList.remove('active'); });
@@ -1413,6 +1482,63 @@
         }
 
         return li;
+    }
+
+    // 文件夹 + 按钮的上下文菜单
+    function showFolderAddMenu(e, node, anchorEl) {
+        // 移除已有菜单
+        var existing = document.querySelector('.proj-tree-context-menu');
+        if (existing) existing.remove();
+
+        var menu = document.createElement('div');
+        menu.className = 'proj-tree-context-menu';
+
+        var rect = anchorEl.getBoundingClientRect();
+        menu.style.left = Math.min(rect.right, window.innerWidth - 170) + 'px';
+        menu.style.top = Math.min(rect.bottom, window.innerHeight - 80) + 'px';
+
+        // 根据文件夹类型构建菜单项
+        var items = [];
+        // 剧本文件夹（id 以 f_scripts 开头，或包含 .script 类型子节点）
+        var isScriptsFolder = node.id.indexOf('f_scripts') === 0;
+        if (!isScriptsFolder && node.children) {
+            isScriptsFolder = node.children.some(function(c) { return c.type === 'script'; });
+        }
+        if (isScriptsFolder) {
+            items.push({label: '📥 导入剧本', action: 'importScript', payload: {}});
+        } else {
+            items.push({label: '（无可用操作）', action: null, disabled: true});
+        }
+
+        items.forEach(function(item) {
+            var mi = document.createElement('div');
+            mi.className = 'proj-tree-context-item' + (item.disabled ? ' disabled' : '');
+            mi.textContent = item.label;
+            if (!item.disabled) {
+                mi.addEventListener('click', function(ev) {
+                    ev.stopPropagation();
+                    menu.remove();
+                    window.__bridgeSend({
+                        action: item.action,
+                        payload: item.payload || {}
+                    });
+                });
+            }
+            menu.appendChild(mi);
+        });
+
+        document.body.appendChild(menu);
+
+        // 点击菜单外关闭
+        setTimeout(function() {
+            var closer = function(ev2) {
+                if (!menu.contains(ev2.target)) {
+                    menu.remove();
+                    document.removeEventListener('click', closer);
+                }
+            };
+            document.addEventListener('click', closer);
+        }, 0);
     }
 
     function escapeHtml(str) {

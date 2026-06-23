@@ -846,6 +846,8 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
                 handleSelectNode(type: nodeType, ref: nodeRef)
             }
         case "requestSync": pushProjectToWebView()
+        case "importScript":
+            importScriptFile()
         case "sidebarRenderVerify":
             let expected = payload["expected"] as? Int ?? -1
             let rendered = payload["rendered"] as? Int ?? -1
@@ -857,6 +859,32 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
             }
         default:
             print("[Bridge] unknown action: \(action), id=\(msgId)")
+        }
+    }
+
+    /// JS bridge: 从文件系统导入 .sws 剧本到当前项目
+    private func importScriptFile() {
+        guard projectManager.isProjectOpen else {
+            showAlert("请先打开一个项目")
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.title = "导入剧本"
+        panel.allowedContentTypes = [UTType(filenameExtension: "sws") ?? .plainText]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+
+        guard let window = findPluginWindow() else { return }
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            do {
+                _ = try self.projectManager.importScript(from: url)
+                try self.projectManager.save()
+                // pushProjectToWebView 内部已通过 openExternalURLs 保留游离文件
+                self.pushProjectToWebView()
+            } catch {
+                self.showAlert("导入失败：\(error.localizedDescription)")
+            }
         }
     }
 
