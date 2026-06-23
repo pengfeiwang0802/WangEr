@@ -113,6 +113,7 @@ class ChatViewController: NSViewController {
 
     // 文件缓存清理:最大 100MB,最多 100 个文件
     private var currentModel = UserDefaults.standard.string(forKey: "selectedModel") ?? "DeepSeek V4 Flash"
+    private let balanceService = BalanceService()
     private var dsBalance: String = "--"
     private var moonshotBalance: String = "--"
     var currentAgentId = "main"
@@ -616,130 +617,14 @@ class ChatViewController: NSViewController {
 
 
     private func fetchBalance() {
-        // 查 DeepSeek 余额
-        let dsKey = AppConfig.deepseekAPIKey
-        if !dsKey.isEmpty, let url = URL(string: "https://api.deepseek.com/user/balance") {
-            var req = URLRequest(url: url)
-            req.setValue("Bearer \(dsKey)", forHTTPHeaderField: "Authorization")
-            req.setValue("application/json", forHTTPHeaderField: "Accept")
-            req.timeoutInterval = 10 // 10秒超时
-            URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
-                guard let self = self else { return }
-                if let error = error {
-AppLogger.shared.log("[Balance] DeepSeek 查询错误: \(error)")
-                    DispatchQueue.main.async {
-                        self.dsBalance = "错误"
-                        self.updateBalanceDisplay()
-                    }
-                    return
-                }
-                guard let httpResponse = response as? HTTPURLResponse else {
-AppLogger.shared.log("[Balance] DeepSeek 无 HTTP 响应")
-                    DispatchQueue.main.async {
-                        self.dsBalance = "无响应"
-                        self.updateBalanceDisplay()
-                    }
-                    return
-                }
-                guard httpResponse.statusCode == 200 else {
-AppLogger.shared.log("[Balance] DeepSeek HTTP \(httpResponse.statusCode)")
-                    DispatchQueue.main.async {
-                        self.dsBalance = "HTTP\(httpResponse.statusCode)"
-                        self.updateBalanceDisplay()
-                    }
-                    return
-                }
-                guard let data = data else {
-                    DispatchQueue.main.async {
-                        self.dsBalance = "无数据"
-                        self.updateBalanceDisplay()
-                    }
-                    return
-                }
-                do {
-                    let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                    if let infos = json?["balance_infos"] as? [[String: Any]],
-                       let first = infos.first,
-                       let bal = first["total_balance"] as? String {
-                        DispatchQueue.main.async {
-                            self.dsBalance = bal
-                            self.updateBalanceDisplay()
-                        }
-                    } else {
-AppLogger.shared.log("[Balance] DeepSeek 响应结构异常: \(String(data: data, encoding: .utf8)?.prefix(200) ?? "N/A")")
-                        DispatchQueue.main.async {
-                            self.dsBalance = "解析失败"
-                            self.updateBalanceDisplay()
-                        }
-                    }
-                } catch {
-AppLogger.shared.log("[Balance] DeepSeek JSON 解析错误: \(error)")
-                    DispatchQueue.main.async {
-                        self.dsBalance = "解析错误"
-                        self.updateBalanceDisplay()
-                    }
-                }
-            }.resume()
-        }
-
-        // 查 Kimi 余额
-        let moonshotKey = AppConfig.moonshotAPIKey
-        guard !moonshotKey.isEmpty else { return }
-        if let url = URL(string: "https://api.moonshot.cn/v1/users/me/balance") {
-            var req = URLRequest(url: url)
-            req.setValue("Bearer \(moonshotKey)", forHTTPHeaderField: "Authorization")
-            req.setValue("application/json", forHTTPHeaderField: "Accept")
-            req.timeoutInterval = 10
-            URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
-                guard let self = self else { return }
-                if let error = error {
-AppLogger.shared.log("[Balance] Kimi 查询错误: \(error)")
-                    DispatchQueue.main.async {
-                        self.moonshotBalance = "错误"
-                        self.updateBalanceDisplay()
-                    }
-                    return
-                }
-                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-AppLogger.shared.log("[Balance] Kimi HTTP \(code)")
-                    DispatchQueue.main.async {
-                        self.moonshotBalance = "HTTP\(code)"
-                        self.updateBalanceDisplay()
-                    }
-                    return
-                }
-                guard let data = data else {
-                    DispatchQueue.main.async {
-                        self.moonshotBalance = "无数据"
-                        self.updateBalanceDisplay()
-                    }
-                    return
-                }
-                do {
-                    let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                    if json?["status"] as? Bool == true,
-                       let balData = json?["data"] as? [String: Any],
-                       let bal = balData["available_balance"] as? Double {
-                        DispatchQueue.main.async {
-                            self.moonshotBalance = String(format: "%.2f", bal)
-                            self.updateBalanceDisplay()
-                        }
-                    } else {
-AppLogger.shared.log("[Balance] Kimi 响应结构异常")
-                        DispatchQueue.main.async {
-                            self.moonshotBalance = "解析失败"
-                            self.updateBalanceDisplay()
-                        }
-                    }
-                } catch {
-AppLogger.shared.log("[Balance] Kimi JSON 解析错误: \(error)")
-                    DispatchQueue.main.async {
-                        self.moonshotBalance = "解析错误"
-                        self.updateBalanceDisplay()
-                    }
-                }
-            }.resume()
+        balanceService.fetchBalances(
+            deepseekKey: AppConfig.deepseekAPIKey,
+            kimiKey: AppConfig.moonshotAPIKey
+        ) { [weak self] balances in
+            guard let self = self else { return }
+            self.dsBalance = balances.deepseek
+            self.moonshotBalance = balances.kimi
+            self.updateBalanceDisplay()
         }
     }
 
