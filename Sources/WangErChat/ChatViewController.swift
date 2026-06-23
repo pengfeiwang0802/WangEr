@@ -65,7 +65,7 @@ class ChatViewController: NSViewController {
     private var isFinalizing = false // 幂等锁:防止 finalize 被多次调用
     private var streamSession: StreamSession?
     private var safetyTimer: Timer?
-    private var jsErrorCount = 0  // JS 连续异常计数,超阈值触发 WebView 重新加载
+    private var jsErrorWindow: [Bool] = []  // 滑动窗口: true=成功, false=失败; 最近20次, ≥5失败触发reload
     private var streamedTextBuffer = ""  // 流式文本累积,消除 finalize 时对 DOM 的依赖
 
     /// 当前活跃的工具调用链(用于显示嵌套工具调用)
@@ -988,17 +988,27 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
                 if let col = nsError.userInfo["WKJavaScriptExceptionColumnNumber"] as? Int {
                     AppLogger.shared.log("[JS Error]  Col: \(col)")
                 }
-                self.jsErrorCount += 1
-                if self.jsErrorCount >= 5 {
-                    AppLogger.shared.log("[WebView] JS 连续崩溃 \(self.jsErrorCount) 次,重新加载 WebView")
-                    self.jsErrorCount = 0
+                // 滑动窗口记录
+                self.jsErrorWindow.append(false)
+                if self.jsErrorWindow.count > 20 { self.jsErrorWindow.removeFirst() }
+                let failures = self.jsErrorWindow.filter { !$0 }.count
+                if failures >= 5 {
+                    AppLogger.shared.log("[WebView] JS 最近20次调用中失败 \(failures) 次,重新加载 WebView")
+                    // 保存当前输入框文字，reload后恢复
+                    let savedText = self.textView.string
+                    self.jsErrorWindow.removeAll()
                     DispatchQueue.main.async {
                         let html = self.chatHTML()
                         self.webView.loadHTMLString(html, baseURL: nil)
+                        // reload完成后恢复输入框
+                        if !savedText.isEmpty {
+                            self.textView.string = savedText
+                        }
                     }
                 }
             } else {
-                self.jsErrorCount = 0
+                self.jsErrorWindow.append(true)
+                if self.jsErrorWindow.count > 20 { self.jsErrorWindow.removeFirst() }
             }
         }
     }

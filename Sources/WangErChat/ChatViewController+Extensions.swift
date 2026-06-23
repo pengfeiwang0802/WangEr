@@ -80,7 +80,8 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 tf.centerYAnchor.constraint(equalTo: cell!.centerYAnchor),
             ])
         }
-        cell?.textField?.stringValue = sessionManager.conversations[safe: row]?.title ?? "会话"
+        let conversations = sessionManager.conversations
+        cell?.textField?.stringValue = (row < conversations.count ? conversations[row].title : "会话")
         return cell
     }
 
