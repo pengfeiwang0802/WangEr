@@ -815,6 +815,8 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
         case "updateCharacter":
             if let id = payload["id"] as? String {
                 mgr.updateCharacter(id: id, name: payload["name"] as? String, tagline: payload["tagline"] as? String, bio: payload["bio"] as? String, avatar: payload["avatar"] as? String)
+                try? mgr.save()
+                pushProjectToWebView()
             }
         case "updateScene":
             if let id = payload["id"] as? String {

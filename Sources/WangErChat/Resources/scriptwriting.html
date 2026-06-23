@@ -525,10 +525,51 @@
         .modal-card .modal-actions .btn-add:hover {
             filter: brightness(1.1);
         }
-        .modal-card .modal-actions .btn-add:disabled {
+        .modal-card .modal-actions .btn-add:disabled,
+        .modal-card .modal-actions .btn-save:disabled {
             opacity: 0.4;
             cursor: not-allowed;
             filter: none;
+        }
+        .modal-card .modal-actions .btn-save {
+            background: var(--accent);
+            color: #fff;
+            border-color: var(--accent);
+            font-weight: 600;
+        }
+        .modal-card .modal-actions .btn-save:hover {
+            filter: brightness(1.1);
+        }
+
+        /* ---- avatar picker ---- */
+        .avatar-palette {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 4px;
+        }
+        .avatar-palette .avatar-opt {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            border: 2px solid transparent;
+            background: var(--bg-secondary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.3em;
+            cursor: pointer;
+            transition: all 0.12s;
+            user-select: none;
+        }
+        .avatar-palette .avatar-opt:hover {
+            background: var(--bg-tertiary);
+            transform: scale(1.12);
+        }
+        .avatar-palette .avatar-opt.selected {
+            border-color: var(--accent);
+            background: var(--accent-soft);
+            transform: scale(1.08);
         }
 
         #sidebar .char-list {
@@ -1636,12 +1677,12 @@
             characters = window._projectData.characters;
         }
 
-        var defaultAvatars = ['🧔','👨','👩','👨🦳','👩🦰','👴','🧑','👩🦱','👨🦱'];
+        var defaultAvatars = ['🧔','👨','👩','👴','🧑','🦸','🦹','🧙','🧛','😎','🤠','👑','🎭','🐱','🐶','🦊','🐰','🤖'];
         var charHTML = '';
         characters.forEach(function(charObj, idx) {
             var name = typeof charObj === 'string' ? charObj : (charObj.name || '');
             var id = typeof charObj === 'string' ? 'char-str-' + idx : (charObj.id || 'char-' + idx);
-            var avatar = defaultAvatars[idx % defaultAvatars.length];
+            var avatar = (charObj.avatar) || defaultAvatars[idx % defaultAvatars.length];
             var color = (charObj.color) || (window._projectData && window._projectData.characterColors && window._projectData.characterColors[name]) || '#999';
             var tagline = (charObj.tagline) || '';
             charHTML += '<div class="char-item" data-char-id="' + id + '" data-char-name="' + escHTML(name) + '">';
@@ -1659,18 +1700,87 @@
         // 角色选中由 init-time 事件委托处理，无需重复绑定
     };
 
-    // ===== 添加角色 Modal（事件委托，不依赖 DOM 加载时序） =====
+    // ===== 角色 Modal（添加 / 编辑共用） =====
+    var AVATAR_PALETTE = ['🧔','👨','👩','👴','🧑','🦸','🦹','🧙','🧛','👼','😎','🤠','👑','🎭','🐱','🐶','🦊','🐰','🤖','👻','🌟','🐲','🐼','🐨','🦄','🐙','🦋','🌸','🔥','💎','🎵','⚡'];
+
+    window._buildAvatarPalette = function(selected) {
+        var palette = document.getElementById('avatar-palette');
+        if (!palette) return;
+        palette.innerHTML = '';
+        AVATAR_PALETTE.forEach(function(emoji) {
+            var opt = document.createElement('span');
+            opt.className = 'avatar-opt' + (emoji === selected ? ' selected' : '');
+            opt.textContent = emoji;
+            opt.addEventListener('click', function() {
+                palette.querySelectorAll('.avatar-opt').forEach(function(o) { o.classList.remove('selected'); });
+                opt.classList.add('selected');
+                var hidden = document.getElementById('add-char-avatar');
+                if (hidden) hidden.value = emoji;
+            });
+            palette.appendChild(opt);
+        });
+    };
+
     window._openAddCharModal = function() {
         var modal = document.getElementById('add-char-modal');
         var nameInput = document.getElementById('add-char-name');
+        var taglineInput = document.getElementById('add-char-tagline');
         var bioInput = document.getElementById('add-char-bio');
         var confirmBtn = document.getElementById('add-char-confirm');
+        var titleEl = document.getElementById('char-modal-title');
+        var hiddenId = document.getElementById('edit-char-id');
+        var hiddenAvatar = document.getElementById('add-char-avatar');
         if (!modal || !nameInput) return;
+        // 重置为添加模式
+        if (hiddenId) hiddenId.value = '';
+        if (hiddenAvatar) hiddenAvatar.value = '';
         nameInput.value = '';
+        if (taglineInput) taglineInput.value = '';
         if (bioInput) bioInput.value = '';
-        if (confirmBtn) confirmBtn.disabled = true;
+        if (confirmBtn) {
+            confirmBtn.disabled = true;
+            confirmBtn.textContent = '添加';
+            confirmBtn.className = 'btn-add';
+        }
+        if (titleEl) titleEl.textContent = '👤 添加角色';
+        window._buildAvatarPalette('');
         modal.classList.add('open');
         setTimeout(function() { nameInput.focus(); }, 50);
+    };
+
+    window._openEditCharModal = function(charId) {
+        var chars = (window._projectData && window._projectData.characters) ? window._projectData.characters : [];
+        var found = null;
+        for (var i = 0; i < chars.length; i++) {
+            if (chars[i].id === charId) { found = chars[i]; break; }
+        }
+        if (!found) return;
+
+        var modal = document.getElementById('add-char-modal');
+        var nameInput = document.getElementById('add-char-name');
+        var taglineInput = document.getElementById('add-char-tagline');
+        var bioInput = document.getElementById('add-char-bio');
+        var confirmBtn = document.getElementById('add-char-confirm');
+        var titleEl = document.getElementById('char-modal-title');
+        var hiddenId = document.getElementById('edit-char-id');
+        var hiddenAvatar = document.getElementById('add-char-avatar');
+        if (!modal || !nameInput) return;
+
+        if (hiddenId) hiddenId.value = charId;
+        nameInput.value = found.name || '';
+        if (taglineInput) taglineInput.value = found.tagline || '';
+        if (bioInput) bioInput.value = found.bio || '';
+        var avatar = found.avatar || '';
+        if (hiddenAvatar) hiddenAvatar.value = avatar;
+        if (confirmBtn) {
+            confirmBtn.disabled = !nameInput.value.trim();
+            confirmBtn.textContent = '保存';
+            confirmBtn.className = 'btn-save';
+        }
+        if (titleEl) titleEl.textContent = '✏️ 编辑角色';
+        window._buildAvatarPalette(avatar);
+        modal.classList.add('open');
+        setTimeout(function() { nameInput.focus(); nameInput.select(); }, 50);
     };
 
     window._closeAddCharModal = function() {
@@ -1680,13 +1790,30 @@
 
     window._submitAddChar = function() {
         var nameInput = document.getElementById('add-char-name');
+        var taglineInput = document.getElementById('add-char-tagline');
         var bioInput = document.getElementById('add-char-bio');
+        var avatarInput = document.getElementById('add-char-avatar');
+        var editId = document.getElementById('edit-char-id');
         var name = nameInput ? nameInput.value.trim() : '';
         if (!name) return;
+        var tagline = taglineInput ? taglineInput.value.trim() : '';
         var bio = bioInput ? bioInput.value.trim() : '';
+        var avatar = avatarInput ? avatarInput.value : '';
+        var charId = editId ? editId.value : '';
+
         var pl = { name: name };
+        if (tagline) pl.tagline = tagline;
         if (bio) pl.bio = bio;
-        window.__bridgeSend({ action: 'addCharacter', payload: pl });
+        if (avatar) pl.avatar = avatar;
+
+        if (charId) {
+            // 编辑模式
+            pl.id = charId;
+            window.__bridgeSend({ action: 'updateCharacter', payload: pl });
+        } else {
+            // 添加模式
+            window.__bridgeSend({ action: 'addCharacter', payload: pl });
+        }
         window._closeAddCharModal();
     };
 
@@ -1696,6 +1823,18 @@
         if (e.target.closest('#sidebar .add-char')) {
             e.stopPropagation();
             window._openAddCharModal();
+            return;
+        }
+        // 📋 详情 按钮
+        if (e.target.closest('#sidebar .sidebar-footer button') && e.target.textContent.includes('详情')) {
+            e.stopPropagation();
+            var active = document.querySelector('#char-list .char-item.active');
+            if (active) {
+                var charId = active.dataset.charId;
+                if (charId) window._openEditCharModal(charId);
+            } else {
+                alert('请先在角色列表中选中一个角色');
+            }
             return;
         }
         // modal 遮罩点击关闭
@@ -1878,18 +2017,28 @@
 
 </script>
 
-<!-- ===== 添加角色 Modal ===== -->
+<!-- ===== 角色 Modal（添加 / 编辑共用） ===== -->
 <div class="modal-backdrop" id="add-char-modal">
-    <div class="modal-card">
-        <h3>👤 添加角色</h3>
+    <div class="modal-card" style="width:400px; max-height:85vh; overflow-y:auto;">
+        <h3 id="char-modal-title">👤 添加角色</h3>
+        <div class="field">
+            <label>头像</label>
+            <div class="avatar-palette" id="avatar-palette"></div>
+        </div>
         <div class="field">
             <label>角色名称 <span style="color:var(--accent);">*</span></label>
             <input type="text" id="add-char-name" placeholder="例如：张伟" autofocus />
         </div>
         <div class="field">
-            <label>简介（可选）</label>
-            <textarea id="add-char-bio" placeholder="一句话描述角色…"></textarea>
+            <label>副标题</label>
+            <input type="text" id="add-char-tagline" placeholder="一句话介绍这个角色…" />
         </div>
+        <div class="field">
+            <label>人物小传</label>
+            <textarea id="add-char-bio" placeholder="写写这个角色的背景、性格、动机…" style="min-height:120px;"></textarea>
+        </div>
+        <input type="hidden" id="add-char-avatar" value="" />
+        <input type="hidden" id="edit-char-id" value="" />
         <div class="modal-actions">
             <button class="btn-cancel" id="add-char-cancel">取消</button>
             <button class="btn-add" id="add-char-confirm">添加</button>
