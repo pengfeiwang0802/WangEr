@@ -62,6 +62,13 @@ class PluginManager: NSObject {
 extension PluginManager: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
+        // 窗口关闭时立即存盘（取消定时器，不等待）
+        for (name, w) in openWindows where w === window {
+            if let plugin = openWindows[name] as? ScriptwritingPlugin {
+                plugin.flushDebouncedSave()
+            }
+            break
+        }
         // 延迟到下一个 run loop 移除，避免窗口关闭流程中释放导致 crash
         DispatchQueue.main.async { [weak self] in
             for (name, w) in self?.openWindows ?? [:] where w === window {
@@ -95,6 +102,8 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
     private var openExternalURLs: [URL] = []
     /// Bridge ID counter
     private var bridgeIdCounter: Int = 0
+    /// 编辑后 2s 自动存盘定时器（安全网，不清脏标记）
+    private var debounceSaveTimer: Timer?
 
     func createWindow() -> NSWindow {
         let window = NSWindow(
@@ -166,6 +175,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
     /// 离开当前文件前自动存盘（防止切换/打开文件导致未保存内容丢失）
     /// 不同于 saveSWSFile：不清除脏标记，静默失败
     private func autoSaveBeforeLeaving() {
+        debounceSaveTimer?.invalidate()  // 立即写入，取消等待中的定时器
         guard let url = currentFileURL, let document = currentDocument else { return }
         let formatter = SWSFormatter()
         let output = formatter.serialize(document)
@@ -326,6 +336,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
     /// 将当前文档直接序列化保存为 .sws 文件
     @objc func saveSWSFile(_ sender: Any?) {
+        debounceSaveTimer?.invalidate()  // 显式保存，取消定时器
         guard let url = currentFileURL else {
             print("ScriptwritingPlugin: 没有打开的文件，无法保存")
             return
@@ -808,6 +819,7 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
 
         currentDocument = newDoc
         setDirtyFlag(true)
+        scheduleDebouncedSave()
 
         for pa in postActions {
             switch pa {
@@ -954,6 +966,32 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
     }
 
     // encodeProjectToJSON / encodeTreeNode 已移至 ScriptwritingEditHandler
+
+    /// 编辑后启动/重置 2s 自动存盘定时器
+    /// 定时器到期 → 序列化写盘，但不清理脏标记（安全网行为）
+    private func scheduleDebouncedSave() {
+        debounceSaveTimer?.invalidate()
+        debounceSaveTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+            guard let self = self,
+                  let url = self.currentFileURL,
+                  let document = self.currentDocument else { return }
+            let formatter = SWSFormatter()
+            let output = formatter.serialize(document)
+            try? output.write(to: url, atomically: true, encoding: .utf8)
+            print("[ScriptwritingPlugin] 💾 自动存盘完成")
+        }
+    }
+
+    /// 窗口关闭时立即存盘（清脏标记 + 取消定时器）
+    fileprivate func flushDebouncedSave() {
+        debounceSaveTimer?.invalidate()
+        guard let url = currentFileURL, let document = currentDocument else { return }
+        let formatter = SWSFormatter()
+        let output = formatter.serialize(document)
+        try? output.write(to: url, atomically: true, encoding: .utf8)
+        setDirtyFlag(false)
+        print("[ScriptwritingPlugin] 💾 窗口关闭存盘完成")
+    }
 
     private func setDirtyFlag(_ dirty: Bool) {
         guard let window = findPluginWindow() else { return }
