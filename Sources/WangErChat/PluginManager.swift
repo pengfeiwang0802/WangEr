@@ -163,7 +163,20 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         loadSWSFile(url: url)
     }
 
+    /// 离开当前文件前自动存盘（防止切换/打开文件导致未保存内容丢失）
+    /// 不同于 saveSWSFile：不清除脏标记，静默失败
+    private func autoSaveBeforeLeaving() {
+        guard let url = currentFileURL, let document = currentDocument else { return }
+        let formatter = SWSFormatter()
+        let output = formatter.serialize(document)
+        try? output.write(to: url, atomically: true, encoding: .utf8)
+    }
+
     func loadSWSFile(url: URL) {
+        // 守卫：离开当前文件前自动存盘，覆盖所有入口
+        // (工具栏打开 / Cmd+O / restoreLastSession / 侧边栏游离文件 / 拖入打开)
+        autoSaveBeforeLeaving()
+
         do {
             let text = try String(contentsOf: url, encoding: .utf8)
             var formatter = SWSFormatter()
@@ -772,6 +785,12 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
         let payload = body["payload"] as? [String: Any] ?? [:]
         let msgId = body["id"] as? String ?? "?"
 
+        // Cmd+S / 工具栏保存 → 写盘
+        if action == "saveCurrentFile" {
+            saveSWSFile(nil)
+            return
+        }
+
         // 剧本编辑操作（原 edit 通道）
         if ScriptwritingEditHandler.isEditAction(action) {
             handleEditAction(action, payload: payload)
@@ -893,10 +912,17 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
         case "script":
             guard let proj = projectManager.project else { return }
             guard let scriptRef = proj.scriptRef(id: ref) else { return }
+            let dir = projectManager.projectDir
+            let swsURL = dir?.appendingPathComponent(scriptRef.path) ?? URL(fileURLWithPath: "/")
+
+            // Skip if same file is already open
+            if let cur = currentFileURL, cur.standardized == swsURL.standardized { return }
+
+            // 守卫：离开当前文件前自动存盘
+            autoSaveBeforeLeaving()
+
             do {
                 let doc = try projectManager.loadScript(ref: scriptRef)
-                let dir = projectManager.projectDir
-                let swsURL = dir?.appendingPathComponent(scriptRef.path) ?? URL(fileURLWithPath: "/")
                 currentFileURL = swsURL
                 currentDocument = doc
                 renderCurrentDocument()
@@ -909,6 +935,10 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
                 showAlert("文件不存在：\(ref)")
                 return
             }
+            // Skip if same file is already open
+            if let cur = currentFileURL, cur.standardized == url.standardized { return }
+
+            // autoSaveBeforeLeaving() 已在 loadSWSFile 内部执行，此处不重复
             loadSWSFile(url: url)
         default:
             break

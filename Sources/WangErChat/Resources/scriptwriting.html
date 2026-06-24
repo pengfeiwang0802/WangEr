@@ -2026,10 +2026,56 @@
         }
     });
 
+    // ── Composition tracking for IME ──
+    var _isComposing = false;
+    document.addEventListener('compositionstart', function(e) {
+        if (e.target.classList.contains('tl-content')) {
+            _isComposing = true;
+        }
+    });
+    document.addEventListener('compositionend', function(e) {
+        if (e.target.classList.contains('tl-content')) {
+            _isComposing = false;
+            // Push final composed text to model
+            var el = e.target;
+            var wrap = el.closest('.block-wrap');
+            if (wrap) {
+                window.__bridgeSend({
+                    action: 'updateBlock',
+                    payload: {
+                        scene: wrap.dataset.scene,
+                        blockIndex: parseInt(wrap.dataset.block),
+                        type: wrap.dataset.type,
+                        value: el.textContent
+                    }
+                });
+            }
+        }
+    });
+
+    // ── Input handler: real-time model push for Timeline blocks + add-char modal ──
     document.addEventListener('input', function(e) {
-        if (e.target.id !== 'add-char-name') return;
-        var confirmBtn = document.getElementById('add-char-confirm');
-        if (confirmBtn) confirmBtn.disabled = !e.target.value.trim();
+        if (e.target.id === 'add-char-name') {
+            var confirmBtn = document.getElementById('add-char-confirm');
+            if (confirmBtn) confirmBtn.disabled = !e.target.value.trim();
+            return;
+        }
+        // Real-time model push: every keystroke in a Timeline block updates the model
+        var el = e.target;
+        if (el.classList.contains('tl-content') && !_isComposing) {
+            var wrap = el.closest('.block-wrap');
+            if (wrap) {
+                window.__bridgeSend({
+                    action: 'updateBlock',
+                    payload: {
+                        scene: wrap.dataset.scene,
+                        blockIndex: parseInt(wrap.dataset.block),
+                        type: wrap.dataset.type,
+                        value: el.textContent
+                    }
+                });
+            }
+        }
     });
 
     function escHTML(s) {
@@ -2039,7 +2085,7 @@
 
     // ===== 可编辑元素事件处理 =====
 
-    // Focusout → push edit to Swift
+    // Focusout → push edit to Swift (safety net; primary path is real-time input handler)
     document.addEventListener('focusout', function(e) {
         var el = e.target;
         
@@ -2061,7 +2107,7 @@
                     scene: wrap.dataset.scene,
                     blockIndex: parseInt(wrap.dataset.block),
                     type: wrap.dataset.type,
-                    value: el.innerText
+                    value: el.textContent
                 }
             });
         }
@@ -2157,7 +2203,7 @@
 
         // Backspace：先判断内容是否为空，再判断光标位置
         if (e.key === 'Backspace') {
-            var blkText = el.innerText || '';
+            var blkText = el.textContent || '';
             if (blkText.length > 0) return; // 有内容（含空行）→ 浏览器原生处理
 
             // 内容为空 → 拦截所有 Backspace，防止浏览器默认行为（丢焦点/导航回退等）
@@ -2175,6 +2221,15 @@
             }
             return;
         }
+
+        // Cmd+S → save current file (bridge to Swift saveSWSFile)
+        if (e.metaKey && e.key === 's') {
+            e.preventDefault();
+            e.stopPropagation();
+            el.blur();  // flush any pending IME state
+            send({ action:'saveCurrentFile' });
+            return;
+        }
     });
 
     // ================================================================
@@ -2190,7 +2245,7 @@
 
         var inputType = e.inputType;
 
-        // ── Paste: strip HTML, insert plain text only ──
+        // ── Paste: strip HTML, insert plain text only, push model ──
         if (inputType === 'insertFromPaste') {
             e.preventDefault();
             var plainText = '';
@@ -2203,6 +2258,21 @@
             }
             if (plainText) {
                 insertTextAtCursor(el, plainText);
+                // Push model update (input event won't fire since we prevented default)
+                if (!_isComposing) {
+                    var wrap = el.closest('.block-wrap');
+                    if (wrap) {
+                        window.__bridgeSend({
+                            action: 'updateBlock',
+                            payload: {
+                                scene: wrap.dataset.scene,
+                                blockIndex: parseInt(wrap.dataset.block),
+                                type: wrap.dataset.type,
+                                value: el.textContent
+                            }
+                        });
+                    }
+                }
             }
             return;
         }
