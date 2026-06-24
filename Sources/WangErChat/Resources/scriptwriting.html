@@ -2177,6 +2177,74 @@
         }
     });
 
+    // ================================================================
+    //  Step 1a — beforeinput interception layer
+    //  Purpose: Strip HTML from paste, block Enter from splitting DOM
+    //           inside Timeline contenteditable blocks.
+    // ================================================================
+
+    document.addEventListener('beforeinput', function(e) {
+        var el = e.target;
+        // Only intercept inside timeline contenteditable blocks
+        if (!el.classList.contains('tl-content')) return;
+
+        var inputType = e.inputType;
+
+        // ── Paste: strip HTML, insert plain text only ──
+        if (inputType === 'insertFromPaste') {
+            e.preventDefault();
+            var plainText = '';
+            if (e.dataTransfer) {
+                plainText = e.dataTransfer.getData('text/plain');
+            }
+            // Fallback: older clipboardData API
+            if (!plainText && e.clipboardData) {
+                plainText = e.clipboardData.getData('text/plain');
+            }
+            if (plainText) {
+                insertTextAtCursor(el, plainText);
+            }
+            return;
+        }
+
+        // ── Enter: prevent DOM split inside contenteditable blocks ──
+        if (inputType === 'insertParagraph') {
+            e.preventDefault();
+            return;
+        }
+
+        // ── IME composition: let browser handle it natively ──
+        // (model push will happen on compositionend in Step 1b)
+        if (e.isComposing) {
+            return;
+        }
+
+        // ── All other inputTypes: allow through (model push in Step 1b) ──
+    });
+
+    // Helper: insert plain text at cursor position in a contenteditable element
+    function insertTextAtCursor(el, text) {
+        var sel = window.getSelection();
+        if (sel.rangeCount === 0) {
+            el.textContent += text;
+            return;
+        }
+        var range = sel.getRangeAt(0);
+        // Guard: ensure the range is within el
+        if (!el.contains(range.commonAncestorContainer)) {
+            el.textContent += text;
+            return;
+        }
+        range.deleteContents();
+        var textNode = document.createTextNode(text);
+        range.insertNode(textNode);
+        // Move cursor after inserted text
+        range.setStartAfter(textNode);
+        range.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(range);
+    }
+
 </script>
 
 <!-- ===== 角色 Modal（添加 / 编辑共用） ===== -->
