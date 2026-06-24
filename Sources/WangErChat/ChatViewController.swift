@@ -522,7 +522,7 @@ class ChatViewController: NSViewController {
 
             // Input area at bottom, full width
             textScrollView.leadingAnchor.constraint(equalTo: chatContainer.leadingAnchor, constant: 8),
-            textScrollView.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -75),
+            textScrollView.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -76),
             textScrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor, constant: -8),
             textScrollView.heightAnchor.constraint(equalToConstant: 60),
 

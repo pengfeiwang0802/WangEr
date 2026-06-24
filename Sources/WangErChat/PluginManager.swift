@@ -64,7 +64,7 @@ extension PluginManager: NSWindowDelegate {
         guard let window = notification.object as? NSWindow else { return }
         // 窗口关闭时立即存盘（取消定时器，不等待）
         for (name, w) in openWindows where w === window {
-            if let plugin = openWindows[name] as? ScriptwritingPlugin {
+            if let plugin = plugins[name] as? ScriptwritingPlugin {
                 plugin.flushDebouncedSave()
             }
             break
@@ -80,6 +80,13 @@ extension PluginManager: NSWindowDelegate {
 }
 
 // MARK: - 编剧助手 Plugin
+/// 内存文件缓冲：支持多文件切换免 I/O
+struct FileBuffer {
+    var document: SWSDocument
+    var isDirty: Bool
+    var lastSavedAt: Date
+}
+
 class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
     let name = "编剧助手"
     let pluginDescription = "AI 辅助剧本创作与一致性分析"
@@ -88,8 +95,25 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
     private var isPageLoaded = false
     /// 当前加载的 .sws 文件路径
     private var currentFileURL: URL?
-    /// 当前解析的文档（用于重新渲染）
-    private var currentDocument: SWSDocument?
+    /// 多文件内存缓冲（key: URL）
+    private var buffers: [URL: FileBuffer] = [:]
+    /// 当前文档（通过 active buffer 计算 — setter 写缓冲，getter 读缓冲）
+    private var currentDocument: SWSDocument? {
+        get {
+            guard let url = currentFileURL else { return nil }
+            return buffers[url]?.document
+        }
+        set {
+            guard let url = currentFileURL, let doc = newValue else { return }
+            if var buf = buffers[url] {
+                buf.document = doc
+                buf.isDirty = true
+                buffers[url] = buf
+            } else {
+                buffers[url] = FileBuffer(document: doc, isDirty: true, lastSavedAt: Date())
+            }
+        }
+    }
     /// 当前使用的显示样式
     private var currentStyle: DisplayStyle = .chineseStandard
     /// 持有布局切换按钮引用，方便更新 label
@@ -187,12 +211,28 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         // (工具栏打开 / Cmd+O / restoreLastSession / 侧边栏游离文件 / 拖入打开)
         autoSaveBeforeLeaving()
 
+        // Buffer hit：文件已在内存中，零 I/O 切换
+        if buffers[url] != nil {
+            print("[Scriptwriting] 📦 buffer hit: \(url.lastPathComponent) (0 I/O)")
+            currentFileURL = url
+            UserDefaults.standard.set(url.path, forKey: ScriptwritingPlugin.lastSWSFileKey)
+            if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "scriptwriting" }) {
+                window.title = "✍️ 编剧助手"
+            }
+            renderCurrentDocument()
+            pushSidebarToWebView()
+            clearInvalidMarks()
+            return
+        }
+
+        // Disk read + enter buffer
         do {
             let text = try String(contentsOf: url, encoding: .utf8)
             var formatter = SWSFormatter()
             let document = formatter.deserialize(text)
+            buffers[url] = FileBuffer(document: document, isDirty: false, lastSavedAt: Date())
             currentFileURL = url
-            currentDocument = document
+            print("[Scriptwriting] 💿 disk read: \(url.lastPathComponent)")
 
             // 持久化：记住最后打开的文件，下次打开编辑器自动恢复
             UserDefaults.standard.set(url.path, forKey: ScriptwritingPlugin.lastSWSFileKey)
@@ -352,6 +392,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         do {
             try output.write(to: url, atomically: true, encoding: .utf8)
             print("ScriptwritingPlugin: 已保存到 \(url.lastPathComponent)")
+            buffers[url]?.isDirty = false
             setDirtyFlag(false)
         } catch {
             print("ScriptwritingPlugin: 保存失败 \(error)")
@@ -933,13 +974,21 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
             // 守卫：离开当前文件前自动存盘
             autoSaveBeforeLeaving()
 
-            do {
-                let doc = try projectManager.loadScript(ref: scriptRef)
+            // Buffer hit?
+            if buffers[swsURL] != nil {
+                print("[Scriptwriting] 📦 buffer hit: \(swsURL.lastPathComponent) (0 I/O)")
                 currentFileURL = swsURL
-                currentDocument = doc
                 renderCurrentDocument()
-            } catch {
-                print("ScriptwritingPlugin: 加载项目脚本失败 \(error)")
+            } else {
+                do {
+                    let doc = try projectManager.loadScript(ref: scriptRef)
+                    buffers[swsURL] = FileBuffer(document: doc, isDirty: false, lastSavedAt: Date())
+                    currentFileURL = swsURL
+                    print("[Scriptwriting] 💿 disk read: \(swsURL.lastPathComponent)")
+                    renderCurrentDocument()
+                } catch {
+                    print("ScriptwritingPlugin: 加载项目脚本失败 \(error)")
+                }
             }
         case "externalScript":
             let url = URL(fileURLWithPath: ref)
@@ -989,6 +1038,7 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
         let formatter = SWSFormatter()
         let output = formatter.serialize(document)
         try? output.write(to: url, atomically: true, encoding: .utf8)
+        buffers[url]?.isDirty = false
         setDirtyFlag(false)
         print("[ScriptwritingPlugin] 💾 窗口关闭存盘完成")
     }
