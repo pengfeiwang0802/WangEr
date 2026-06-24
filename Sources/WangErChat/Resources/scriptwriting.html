@@ -2125,6 +2125,90 @@
         return preRange.toString().length === 0;
     }
 
+    // 光标是否在 contenteditable 元素的最末尾
+    function isAtContentEnd(el) {
+        var sel = window.getSelection();
+        if (sel.rangeCount === 0) return false;
+        var range = sel.getRangeAt(0);
+        if (!range.collapsed) return false;
+        var endRange = document.createRange();
+        endRange.selectNodeContents(el);
+        endRange.setStart(range.startContainer, range.startOffset);
+        return endRange.toString().length === 0;
+    }
+
+    // 光标在 contenteditable 内的字符偏移量
+    function getCursorOffset(el) {
+        var sel = window.getSelection();
+        if (sel.rangeCount === 0) return 0;
+        var range = sel.getRangeAt(0);
+        if (!el.contains(range.commonAncestorContainer)) return 0;
+        var preRange = document.createRange();
+        preRange.selectNodeContents(el);
+        preRange.setEnd(range.endContainer, range.endOffset);
+        return preRange.toString().length;
+    }
+
+    // 找到下一个可编辑块（同场景或下一场景）
+    function getNextBlock(el) {
+        var wrap = el.closest('.block-wrap');
+        if (!wrap) return null;
+        var next = wrap.nextElementSibling;
+        while (next) {
+            if (next.classList.contains('block-wrap')) {
+                var c = next.querySelector('.tl-content');
+                if (c) return c;
+            }
+            next = next.nextElementSibling;
+        }
+        return null;
+    }
+
+    // 找到上一个可编辑块
+    function getPrevBlock(el) {
+        var wrap = el.closest('.block-wrap');
+        if (!wrap) return null;
+        var prev = wrap.previousElementSibling;
+        while (prev) {
+            if (prev.classList.contains('block-wrap')) {
+                var c = prev.querySelector('.tl-content');
+                if (c) return c;
+            }
+            prev = prev.previousElementSibling;
+        }
+        return null;
+    }
+
+    // 聚焦到块开头
+    function focusBlockStart(el) {
+        el.focus();
+        var r = document.createRange();
+        r.selectNodeContents(el);
+        r.collapse(true);
+        var s = window.getSelection();
+        s.removeAllRanges();
+        s.addRange(r);
+    }
+
+    // 聚焦到块末尾
+    function focusBlockEnd(el) {
+        el.focus();
+        var r = document.createRange();
+        r.selectNodeContents(el);
+        r.collapse(false);
+        var s = window.getSelection();
+        s.removeAllRanges();
+        s.addRange(r);
+    }
+
+    // 重索引场景内所有块的 data-block 属性
+    function reindexSceneBlocks(sceneNum) {
+        var wraps = document.querySelectorAll('.block-wrap[data-scene="' + sceneNum + '"]');
+        for (var i = 0; i < wraps.length; i++) {
+            wraps[i].setAttribute('data-block', String(i));
+        }
+    }
+
     // ── Chip 选中态交互 ──
     // 点击 chip → 选中 / 取消选中
     document.addEventListener('click', function(e) {
@@ -2201,24 +2285,96 @@
             return;
         }
 
-        // Backspace：先判断内容是否为空，再判断光标位置
+        // ── Backspace: 合并到上一块 / 删除空块 ──
         if (e.key === 'Backspace') {
             var blkText = el.textContent || '';
-            if (blkText.length > 0) return; // 有内容（含空行）→ 浏览器原生处理
 
-            // 内容为空 → 拦截所有 Backspace，防止浏览器默认行为（丢焦点/导航回退等）
+            // Case 1: 有内容 + 光标在开头 → 合并到上一个块
+            if (blkText.length > 0 && isAtStart(el)) {
+                var prevBlock = getPrevBlock(el);
+                if (!prevBlock) return; // 场景第一块,无法合并
+                e.preventDefault();
+                var prevText = prevBlock.textContent || '';
+                prevBlock.textContent = prevText + blkText;
+                focusBlockEnd(prevBlock);
+                wrap.parentNode.removeChild(wrap);
+                reindexSceneBlocks(sceneNum);
+                send({ action:'mergeWithPreviousBlock', payload:{ scene:sceneNum, blockIndex:blockIdx } });
+                return;
+            }
+
+            // Case 2: 有内容 + 光标不在开头 → 浏览器原生删除字符
+            if (blkText.length > 0) return;
+
+            // Case 3: 空内容 → 拦截防止浏览器后退导航
             e.preventDefault();
-            if (!isAtStart(el)) return; // 光标不在最开头（contenteditable 隐式<br>等）→ 只拦截
+            if (!isAtStart(el)) return;
 
-            // 内容为空 + 光标在起始位置
+            // 空内容 + 光标在开头 + 非唯一块 → 删除空块
             var allWraps = document.querySelectorAll('.block-wrap[data-scene="' + sceneNum + '"]');
-            if (allWraps.length <= 1) return; // 场景内唯一一行 → 底线守卫
+            if (allWraps.length <= 1) return; // 场景内唯一块守卫
 
-            // 非最后一块：action 删 block，dialogue 不删（只在 chip 选中态删）
             if (type !== 'dialogue') {
                 el.blur();
                 send({ action:'deleteBlock', payload:{ scene:sceneNum, blockIndex:blockIdx } });
             }
+            return;
+        }
+
+        // ── Arrow keys: 在可编辑块之间导航 ──
+        if (e.key === 'ArrowDown') {
+            if (isAtContentEnd(el)) {
+                e.preventDefault();
+                var next = getNextBlock(el);
+                if (next) focusBlockStart(next);
+            }
+            return;
+        }
+        if (e.key === 'ArrowUp') {
+            if (isAtContentStart(el)) {
+                e.preventDefault();
+                var prev = getPrevBlock(el);
+                if (prev) focusBlockEnd(prev);
+            }
+            return;
+        }
+
+        // ── Enter: 在光标处拆分为两个块 ──
+        if (e.key === 'Enter' && !e.metaKey && !e.isComposing) {
+            e.preventDefault();
+            var cursorOffset = getCursorOffset(el);
+            var fullText = el.textContent || '';
+            var beforeText = fullText.substring(0, cursorOffset);
+            var afterText = fullText.substring(cursorOffset);
+
+            // 乐观更新：当前块只保留前半部分
+            el.textContent = beforeText;
+            focusBlockEnd(el);
+
+            // 构建新块 DOM
+            var newWrap = document.createElement('div');
+            newWrap.className = 'block-wrap';
+            newWrap.setAttribute('data-scene', sceneNum);
+            newWrap.setAttribute('data-type', type);
+            if (type === 'action') {
+                newWrap.innerHTML = '<div class="tl-block tl-action"><span class="tl-block-icon">📝</span><div class="tl-content" contenteditable="true">' + escHTML(afterText) + '</div></div>';
+            } else if (type === 'dialogue') {
+                var origChip = wrap.querySelector('.char-chip');
+                var chipHTML = origChip ? origChip.outerHTML : '';
+                var origMod = wrap.querySelector('.tl-char-mod');
+                var modHTML = origMod ? origMod.outerHTML : '';
+                newWrap.innerHTML = '<div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span>' + chipHTML + modHTML + '</div><div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><div class="tl-content" contenteditable="true">' + escHTML(afterText) + '</div></div>';
+            } else {
+                newWrap.innerHTML = '<div class="tl-block tl-action" style="color:#888;font-style:italic;"><span class="tl-block-icon">💬</span><div class="tl-content" contenteditable="true">' + escHTML(afterText) + '</div></div>';
+            }
+            wrap.parentNode.insertBefore(newWrap, wrap.nextSibling);
+            reindexSceneBlocks(sceneNum);
+
+            // 聚焦新块
+            var newContent = newWrap.querySelector('.tl-content');
+            if (newContent) focusBlockStart(newContent);
+
+            send({ action:'splitBlock', payload:{ scene:sceneNum, blockIndex:blockIdx, beforeText:beforeText, afterText:afterText } });
             return;
         }
 

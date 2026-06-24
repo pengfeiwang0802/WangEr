@@ -26,7 +26,8 @@ enum ScriptwritingEditHandler {
 
     static let editActions: Set<String> = [
         "updateHeading", "updateBlock", "insertBlock",
-        "deleteBlock", "insertBlockBefore", "deletePairAndFocusPrevious"
+        "deleteBlock", "insertBlockBefore", "deletePairAndFocusPrevious",
+        "splitBlock", "mergeWithPreviousBlock"
     ]
 
     static func isEditAction(_ action: String) -> Bool {
@@ -41,6 +42,8 @@ enum ScriptwritingEditHandler {
         case "deleteBlock": return applyDeleteBlock(body, document: document)
         case "insertBlockBefore": return applyInsertBlockBefore(body, document: document)
         case "deletePairAndFocusPrevious": return applyDeletePairAndFocusPrevious(body, document: document)
+        case "splitBlock": return applySplitBlock(body, document: document)
+        case "mergeWithPreviousBlock": return applyMergeWithPrevious(body, document: document)
         default: return .noChange
         }
     }
@@ -231,5 +234,89 @@ enum ScriptwritingEditHandler {
         let focusIdx = wasOnlyBlock ? blockIdx : max(0, blockIdx - 1)
         return .updated(SWSDocument(metadata: document.metadata, scenes: scenes),
                         postActions: [.reRender, .focusBlock(scene: sceneNum, blockIndex: focusIdx)])
+    }
+
+    // MARK: - Step 1d: 块内 Enter 拆分 + Backspace 合并
+
+    /// Enter 在光标处拆分为两个块（JS 已乐观更新 DOM）
+    private static func applySplitBlock(_ body: [String: Any], document: SWSDocument) -> ScriptwritingEditResult {
+        guard let sceneNum = body["scene"] as? String,
+              let blockIdx = body["blockIndex"] as? Int,
+              let beforeText = body["beforeText"] as? String,
+              let afterText = body["afterText"] as? String else { return .noChange }
+        guard let sceneIdx = document.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return .noChange }
+        var scene = document.scenes[sceneIdx]
+        guard blockIdx < scene.blocks.count else { return .noChange }
+
+        var blocks = scene.blocks
+        let block = blocks[blockIdx]
+        let newBlock: SWSBlock
+
+        switch block {
+        case .action:
+            blocks[blockIdx] = .action(SWSActionBlock(text: beforeText))
+            newBlock = .action(SWSActionBlock(text: afterText))
+        case .dialogue(let d):
+            blocks[blockIdx] = .dialogue(SWSDialogueBlock(character: d.character, modifier: d.modifier, line: beforeText))
+            newBlock = .dialogue(SWSDialogueBlock(character: d.character, modifier: d.modifier, line: afterText))
+        case .unattributed:
+            blocks[blockIdx] = .unattributed(SWSUnattributedBlock(lines: [beforeText]))
+            newBlock = .unattributed(SWSUnattributedBlock(lines: [afterText]))
+        }
+
+        blocks.insert(newBlock, at: blockIdx + 1)
+        scene = SWSScene(heading: scene.heading, blocks: blocks)
+        var scenes = document.scenes
+        scenes[sceneIdx] = scene
+        return .updated(SWSDocument(metadata: document.metadata, scenes: scenes),
+                        postActions: [.focusBlock(scene: sceneNum, blockIndex: blockIdx + 1)])
+    }
+
+    /// Backspace 在块开头合并到上一个块（JS 已乐观更新 DOM）
+    private static func applyMergeWithPrevious(_ body: [String: Any], document: SWSDocument) -> ScriptwritingEditResult {
+        guard let sceneNum = body["scene"] as? String,
+              let blockIdx = body["blockIndex"] as? Int else { return .noChange }
+        guard blockIdx > 0 else { return .noChange }
+        guard let sceneIdx = document.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return .noChange }
+        var scene = document.scenes[sceneIdx]
+        guard blockIdx < scene.blocks.count else { return .noChange }
+
+        var blocks = scene.blocks
+        let prevBlock = blocks[blockIdx - 1]
+        let currBlock = blocks[blockIdx]
+
+        // 提取文本
+        let prevText: String
+        let currText: String
+        switch prevBlock {
+        case .action(let a):      prevText = a.text
+        case .dialogue(let d):    prevText = d.line
+        case .unattributed(let u): prevText = u.lines.joined(separator: "\n")
+        }
+        switch currBlock {
+        case .action(let a):      currText = a.text
+        case .dialogue(let d):    currText = d.line
+        case .unattributed(let u): currText = u.lines.joined(separator: "\n")
+        }
+
+        // 同类型合并保留结构，否则降级为 action
+        switch (prevBlock, currBlock) {
+        case (.action, .action):
+            blocks[blockIdx - 1] = .action(SWSActionBlock(text: prevText + currText))
+        case (.dialogue(let p), .dialogue):
+            blocks[blockIdx - 1] = .dialogue(SWSDialogueBlock(character: p.character, modifier: p.modifier, line: prevText + currText))
+        case (.unattributed, .unattributed):
+            blocks[blockIdx - 1] = .unattributed(SWSUnattributedBlock(lines: [prevText + currText]))
+        default:
+            // 跨类型降级为 action
+            blocks[blockIdx - 1] = .action(SWSActionBlock(text: prevText + currText))
+        }
+
+        blocks.remove(at: blockIdx)
+        scene = SWSScene(heading: scene.heading, blocks: blocks)
+        var scenes = document.scenes
+        scenes[sceneIdx] = scene
+        return .updated(SWSDocument(metadata: document.metadata, scenes: scenes),
+                        postActions: [.focusBlock(scene: sceneNum, blockIndex: blockIdx - 1)])
     }
 }
