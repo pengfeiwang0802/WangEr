@@ -2125,6 +2125,11 @@
         return preRange.toString().length === 0;
     }
 
+    // 光标是否在 contenteditable 元素的最开头（同 isAtStart，语义别名）
+    function isAtContentStart(el) {
+        return isAtStart(el);
+    }
+
     // 光标是否在 contenteditable 元素的最末尾
     function isAtContentEnd(el) {
         var sel = window.getSelection();
@@ -2149,10 +2154,11 @@
         return preRange.toString().length;
     }
 
-    // 找到下一个可编辑块（同场景或下一场景）
+    // 找到下一个可编辑块（跨场景）
     function getNextBlock(el) {
         var wrap = el.closest('.block-wrap');
         if (!wrap) return null;
+        // 同场景内下一个 block-wrap
         var next = wrap.nextElementSibling;
         while (next) {
             if (next.classList.contains('block-wrap')) {
@@ -2161,13 +2167,26 @@
             }
             next = next.nextElementSibling;
         }
+        // 跨场景：下一个 scene-card 的第一个 block-wrap
+        var sceneCard = wrap.closest('.scene-card');
+        if (sceneCard) {
+            var nextCard = sceneCard.nextElementSibling;
+            while (nextCard) {
+                if (nextCard.classList.contains('scene-card')) {
+                    var firstBlock = nextCard.querySelector('.block-wrap .tl-content');
+                    if (firstBlock) return firstBlock;
+                }
+                nextCard = nextCard.nextElementSibling;
+            }
+        }
         return null;
     }
 
-    // 找到上一个可编辑块
+    // 找到上一个可编辑块（跨场景）
     function getPrevBlock(el) {
         var wrap = el.closest('.block-wrap');
         if (!wrap) return null;
+        // 同场景内上一个 block-wrap
         var prev = wrap.previousElementSibling;
         while (prev) {
             if (prev.classList.contains('block-wrap')) {
@@ -2175,6 +2194,18 @@
                 if (c) return c;
             }
             prev = prev.previousElementSibling;
+        }
+        // 跨场景：上一个 scene-card 的最后一个 block-wrap
+        var sceneCard = wrap.closest('.scene-card');
+        if (sceneCard) {
+            var prevCard = sceneCard.previousElementSibling;
+            while (prevCard) {
+                if (prevCard.classList.contains('scene-card')) {
+                    var blocks = prevCard.querySelectorAll('.block-wrap .tl-content');
+                    if (blocks.length > 0) return blocks[blocks.length - 1];
+                }
+                prevCard = prevCard.previousElementSibling;
+            }
         }
         return null;
     }
