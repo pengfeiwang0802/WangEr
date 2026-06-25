@@ -281,7 +281,7 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
 
     private static let lastSWSFileKey = "com.wanger.lastSWSFile"
 
-    private func renderCurrentDocument() {
+    private func renderCurrentDocument(focusParams: [String: Any]? = nil) {
         guard let document = currentDocument else {
             print("[PluginManager] renderCurrentDocument: currentDocument is nil, skip")
             return
@@ -315,7 +315,11 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         let timelineJSON = buildTimelineJSON(document: document, characterColors: characterColors)
         let tB64 = timelineJSON.data(using: .utf8)!.base64EncodedString(options: [])
         print("[PluginManager] timeline: json=\(timelineJSON.utf8.count/1024)KB, b64=\(tB64.utf8.count/1024)KB")
-        bridgeSend(action: "renderTimeline", payload: ["b64": tB64, "expectedScenes": document.scenes.count])
+        var timelinePayload: [String: Any] = ["b64": tB64, "expectedScenes": document.scenes.count]
+        if let fp = focusParams {
+            for (k, v) in fp { timelinePayload[k] = v }
+        }
+        bridgeSend(action: "renderTimeline", payload: timelinePayload)
     }
 
     /// 将 SWS 文档转为 JSON（供 JS 渲染时间轴用）
@@ -862,17 +866,43 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
         setDirtyFlag(true)
         scheduleDebouncedSave()
 
+        // Collect reRender + focusBlock/focusBlockChipSelected; merge into single render call
+        var hasReRender = false
+        var focusTarget: (scene: String, blockIndex: Int, atEnd: Bool, cursorOffset: Int?)? = nil
+        var chipTarget: (scene: String, blockIndex: Int)? = nil
+
         for pa in postActions {
             switch pa {
-            case .reRender:
-                renderCurrentDocument()
-            case .focusBlock(let scene, let idx):
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                    self?.focusBlock(scene: scene, blockIndex: idx)
-                }
+            case .reRender: hasReRender = true
+            case .focusBlock(let scene, let idx, let atEnd, let cursorOffset):
+                focusTarget = (scene, idx, atEnd, cursorOffset)
             case .focusBlockChipSelected(let scene, let idx):
+                chipTarget = (scene, idx)
+            }
+        }
+
+        if hasReRender {
+            var rp: [String: Any] = [:]
+            if let ft = focusTarget {
+                rp["focusScene"] = ft.scene
+                rp["focusBlockIndex"] = ft.blockIndex
+                rp["focusAtEnd"] = ft.atEnd
+                if let off = ft.cursorOffset { rp["focusCursorOffset"] = off }
+            }
+            if let ct = chipTarget {
+                rp["focusChipScene"] = ct.scene
+                rp["focusChipBlockIndex"] = ct.blockIndex
+            }
+            renderCurrentDocument(focusParams: rp.isEmpty ? nil : rp)
+        } else {
+            if let ft = focusTarget {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                    self?.focusBlockChipSelected(scene: scene, blockIndex: idx)
+                    self?.focusBlock(scene: ft.scene, blockIndex: ft.blockIndex, atEnd: ft.atEnd, cursorOffset: ft.cursorOffset)
+                }
+            }
+            if let ct = chipTarget {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    self?.focusBlockChipSelected(scene: ct.scene, blockIndex: ct.blockIndex)
                 }
             }
         }
@@ -1010,8 +1040,10 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
         bridgeSend(action: "focusBlockChipSelected", payload: ["scene": scene, "blockIndex": blockIndex])
     }
 
-    private func focusBlock(scene: String, blockIndex: Int) {
-        bridgeSend(action: "focusBlock", payload: ["scene": scene, "blockIndex": blockIndex])
+    private func focusBlock(scene: String, blockIndex: Int, atEnd: Bool = false, cursorOffset: Int? = nil) {
+        var payload: [String: Any] = ["scene": scene, "blockIndex": blockIndex, "atEnd": atEnd]
+        if let off = cursorOffset { payload["cursorOffset"] = off }
+        bridgeSend(action: "focusBlock", payload: payload)
     }
 
     // encodeProjectToJSON / encodeTreeNode 已移至 ScriptwritingEditHandler

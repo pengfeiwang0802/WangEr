@@ -25,7 +25,7 @@
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
-            font-family: -apple-system, "PingFang SC", "Noto Sans SC", "Helvetica Neue", sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
             background: var(--bg-primary);
             color: var(--text-primary);
             height: 100vh;
@@ -866,9 +866,6 @@
             font-size: 0.8em;
             opacity: 0.6;
         }
-        .tl-block.tl-action {
-            color: #5a8a5a;
-        }
         .tl-block.tl-dialogue {
             color: #4a80a8;
         }
@@ -879,12 +876,30 @@
             margin-left: 7px;
         }
         .tl-char-name {
+            font-family: "Songti SC", "宋体", "SimSun", serif;
             font-weight: 600;
             color: #e8a44a;
         }
         .tl-char-mod {
+            font-family: "Songti SC", "宋体", "SimSun", serif;
             font-size: 0.85em;
             color: var(--text-muted);
+            outline: none;
+            min-width: 1.2em;
+            display: inline-block;
+            border-radius: 3px;
+            padding: 0 2px;
+            transition: background 0.12s;
+        }
+        .tl-char-mod:focus {
+            outline: none;
+            background: var(--bg-hover, rgba(128,128,128,0.12));
+        }
+        .tl-char-mod:empty::before {
+            content: '…';
+            color: var(--text-muted);
+            opacity: 0.25;
+            pointer-events: none;
         }
         .tl-block-text {
             color: var(--text-secondary);
@@ -916,9 +931,9 @@
         /* 文本编辑区（contenteditable，原地编辑，无切换） */
         .tl-content {
             flex: 1;
+            font-family: "Songti SC", "宋体", "SimSun", serif;
             font-size: 0.88em;
             line-height: 1.5;
-            font-family: inherit;
             color: inherit;
             outline: none;
             border-radius: 4px;
@@ -935,7 +950,7 @@
         .block-wrap:focus-within {
             border-left-color: var(--accent);
         }
-        .block-wrap[data-type="action"] .tl-content { color: #5a8a5a; }
+        .block-wrap[data-type="action"] .tl-content { color: var(--text-primary); }
         .block-wrap[data-type="dialogue"] .tl-content { color: var(--text-primary); }
         .block-wrap[data-type="unattributed"] .tl-content { color: #888; font-style: italic; }
 
@@ -967,6 +982,12 @@
         .block-wrap[data-chip-selected] .char-chip {
             border-color: var(--accent) !important;
             box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+        }
+        /* 编辑模式：chip 可输入 */
+        .block-wrap[data-chip-editing] .char-chip {
+            outline: none;
+            user-select: text;
+            cursor: text;
         }
 
         /* 场景分隔条 */
@@ -1248,6 +1269,14 @@
             var el = document.getElementById('timeline-scroll');
             var cards = el ? el.querySelectorAll('.scene-card').length : 0;
             console.log('[bridge] renderTimeline done, expected=' + (payload.expectedScenes || '?') + ' cards=' + cards);
+
+            // Apply focus synchronously (before browser paints) when reRender + focusBlock co-occur
+            if (payload.focusScene != null && payload.focusBlockIndex != null) {
+                _applyFocus(payload.focusScene, payload.focusBlockIndex, payload.focusAtEnd, payload.focusCursorOffset);
+            }
+            if (payload.focusChipScene != null && payload.focusChipBlockIndex != null) {
+                _applyFocusChip(payload.focusChipScene, payload.focusChipBlockIndex);
+            }
         }
     }
 
@@ -1275,22 +1304,46 @@
         }
     }
 
-    function _bridgeFocusBlock(payload) {
-        var w = document.querySelector('.block-wrap[data-scene="' + payload.scene + '"][data-block="' + payload.blockIndex + '"]');
+    function _applyFocus(scene, blockIndex, atEnd, cursorOffset) {
+        var w = document.querySelector('.block-wrap[data-scene="' + scene + '"][data-block="' + blockIndex + '"]');
         if (w) {
             var c = w.querySelector('.tl-content');
             if (c) {
                 c.focus();
                 var r = document.createRange();
-                r.selectNodeContents(c); r.collapse(false);
+                if (cursorOffset != null) {
+                    r.setStart(c.firstChild || c, Math.min(cursorOffset, (c.textContent || '').length));
+                    r.collapse(true);
+                } else {
+                    r.selectNodeContents(c);
+                    r.collapse(atEnd ? false : true);
+                }
                 var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
             }
         }
     }
 
+    function _applyFocusChip(scene, blockIndex) {
+        var w = document.querySelector('.block-wrap[data-scene="' + scene + '"][data-block="' + blockIndex + '"]');
+        if (!w) return;
+        w.setAttribute('data-chip-selected', '');
+        w.setAttribute('data-chip-editing', '');
+        var chip = w.querySelector('.char-chip');
+        if (chip) {
+            chip.setAttribute('contenteditable', 'true');
+            chip.focus();
+            var r = document.createRange();
+            r.selectNodeContents(chip);
+            var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+        }
+    }
+
+    function _bridgeFocusBlock(payload) {
+        _applyFocus(payload.scene, payload.blockIndex, payload.atEnd, payload.cursorOffset);
+    }
+
     function _bridgeFocusBlockChipSelected(payload) {
-        var w = document.querySelector('.block-wrap[data-scene="' + payload.scene + '"][data-block="' + payload.blockIndex + '"]');
-        if (w) { w.setAttribute('data-chip-selected', ''); }
+        _applyFocusChip(payload.scene, payload.blockIndex);
     }
 
     // ===== 模式切换（时间轴 / 剧本） =====
@@ -1330,9 +1383,22 @@
     // ===== 项目侧边栏 折叠 =====
     const projSidebar = document.getElementById('project-sidebar');
     const btnToggleProj = document.getElementById('btn-toggle-project-sidebar');
+    let projSidebarSavedWidth = null;
     btnToggleProj.addEventListener('click', () => {
-        projSidebar.classList.toggle('collapsed');
-        btnToggleProj.textContent = projSidebar.classList.contains('collapsed') ? '📂' : '📁';
+        const isCollapsed = projSidebar.classList.toggle('collapsed');
+        if (isCollapsed) {
+            // store current width before collapsing to restore later
+            projSidebarSavedWidth = projSidebar.style.width || projSidebar.offsetWidth + 'px';
+            projSidebar.style.width = '';
+            projSidebar.style.minWidth = '';
+        } else {
+            // restore saved or default (CSS variable handles it if no inline needed)
+            if (projSidebarSavedWidth) {
+                projSidebar.style.width = projSidebarSavedWidth;
+                projSidebar.style.minWidth = projSidebarSavedWidth;
+            }
+        }
+        btnToggleProj.textContent = isCollapsed ? '📂' : '📁';
     });
 
     // ===== 项目侧边栏 拖拽调整宽度 =====
@@ -1550,9 +1616,20 @@
     // ===== Sidebar 折叠 =====
     const sidebar = document.getElementById('sidebar');
     const btnToggle = document.getElementById('btn-toggle-sidebar');
+    let sidebarSavedWidth = null;
     btnToggle.addEventListener('click', () => {
-        sidebar.classList.toggle('collapsed');
-        btnToggle.textContent = sidebar.classList.contains('collapsed') ? '📁' : '📂';
+        const isCollapsed = sidebar.classList.toggle('collapsed');
+        if (isCollapsed) {
+            sidebarSavedWidth = sidebar.style.width || sidebar.offsetWidth + 'px';
+            sidebar.style.width = '';
+            sidebar.style.minWidth = '';
+        } else {
+            if (sidebarSavedWidth) {
+                sidebar.style.width = sidebarSavedWidth;
+                sidebar.style.minWidth = sidebarSavedWidth;
+            }
+        }
+        btnToggle.textContent = isCollapsed ? '📁' : '📂';
     });
 
     // ===== 默认时间轴模式 =====
@@ -1742,7 +1819,7 @@
                 (sc.blocks || []).forEach(function(blk) {
                     if (blk.type === 'action') {
                         cardHTML += '<div class="block-wrap" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-type="action">';
-                        cardHTML += '<div class="tl-block tl-action"><span class="tl-block-icon">📝</span>';
+                        cardHTML += '<div class="tl-block tl-action">';
                         cardHTML += '<div class="tl-content" contenteditable="true">' + escHTML(blk.text || '') + '</div>';
                         cardHTML += '</div></div>';
                         blkIdx++;
@@ -1752,7 +1829,7 @@
                         cardHTML += '<div class="tl-block tl-dialogue">';
                         cardHTML += '<span class="tl-block-icon">👤</span>';
                         cardHTML += '<span class="char-chip" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-character="' + escHTML(blk.character || '') + '" style="background:' + charColor + '18;color:' + charColor + ';">' + escHTML(blk.character || '') + '</span>';
-                        if (blk.modifier) cardHTML += '<span class="tl-char-mod">（' + escHTML(blk.modifier) + '）</span>';
+                        cardHTML += '（<span class="tl-char-mod" contenteditable="true">' + escHTML(blk.modifier || '') + '</span>）';
                         cardHTML += '</div>';
                         cardHTML += '<div class="tl-block tl-dialogue-text">';
                         cardHTML += '<span class="tl-block-icon">💬</span>';
@@ -2060,8 +2137,38 @@
             if (confirmBtn) confirmBtn.disabled = !e.target.value.trim();
             return;
         }
-        // Real-time model push: every keystroke in a Timeline block updates the model
+        // Chip 编辑（contenteditable char-chip）→ push to model
         var el = e.target;
+        if (el.classList.contains('char-chip') && el.contentEditable === 'true' && !_isComposing) {
+            var chipWrap = el.closest('.block-wrap');
+            if (chipWrap) {
+                window.__bridgeSend({
+                    action: 'updateBlockChipCharacter',
+                    payload: {
+                        scene: chipWrap.dataset.scene,
+                        blockIndex: parseInt(chipWrap.dataset.block),
+                        character: el.textContent.trim()
+                    }
+                });
+            }
+            return;
+        }
+        // Modifier edit → push to model
+        if (el.classList.contains('tl-char-mod') && !_isComposing) {
+            var wrap = el.closest('.block-wrap');
+            if (wrap) {
+                window.__bridgeSend({
+                    action: 'updateModifier',
+                    payload: {
+                        scene: wrap.dataset.scene,
+                        blockIndex: parseInt(wrap.dataset.block),
+                        value: el.textContent
+                    }
+                });
+            }
+            return;
+        }
+        // Real-time model push: every keystroke in a Timeline block updates the model
         if (el.classList.contains('tl-content') && !_isComposing) {
             var wrap = el.closest('.block-wrap');
             if (wrap) {
@@ -2096,6 +2203,33 @@
                     scene: el.dataset.scene,
                     field: el.dataset.field,
                     value: el.value.trim()
+                }
+            });
+        } else if (el.classList.contains('tl-char-mod')) {
+            var wrap = el.closest('.block-wrap');
+            if (!wrap) return;
+            window.__bridgeSend({
+                action: 'updateModifier',
+                payload: {
+                    scene: wrap.dataset.scene,
+                    blockIndex: parseInt(wrap.dataset.block),
+                    value: el.textContent
+                }
+            });
+        } else if (el.classList.contains('char-chip') && el.contentEditable === 'true') {
+            // Chip 编辑失焦 → 清理编辑状态，同步角色名
+            var wrap = el.closest('.block-wrap');
+            if (!wrap) return;
+            if (wrap.hasAttribute('data-chip-editing')) {
+                wrap.removeAttribute('data-chip-editing');
+                el.removeAttribute('contenteditable');
+            }
+            window.__bridgeSend({
+                action: 'updateBlockChipCharacter',
+                payload: {
+                    scene: wrap.dataset.scene,
+                    blockIndex: parseInt(wrap.dataset.block),
+                    character: el.textContent.trim()
                 }
             });
         } else if (el.classList.contains('tl-content')) {
@@ -2232,6 +2366,22 @@
         s.addRange(r);
     }
 
+    // 聚焦到块内指定字符偏移
+    function focusBlockAt(el, offset) {
+        el.focus();
+        var r = document.createRange();
+        var child = el.firstChild;
+        if (child && child.nodeType === Node.TEXT_NODE) {
+            r.setStart(child, Math.min(offset, child.textContent.length));
+        } else {
+            r.setStart(el, 0);
+        }
+        r.collapse(true);
+        var s = window.getSelection();
+        s.removeAllRanges();
+        s.addRange(r);
+    }
+
     // 重索引场景内所有块的 data-block 属性
     function reindexSceneBlocks(sceneNum) {
         var wraps = document.querySelectorAll('.block-wrap[data-scene="' + sceneNum + '"]');
@@ -2241,25 +2391,48 @@
     }
 
     // ── Chip 选中态交互 ──
-    // 点击 chip → 选中 / 取消选中
+    // 单击 chip → 选中；双击 chip → 进入编辑模式
     document.addEventListener('click', function(e) {
         var chip = e.target.closest('.char-chip');
         if (chip) {
             e.stopPropagation();
             var wrap = chip.closest('.block-wrap');
             if (!wrap) return;
-            if (wrap.hasAttribute('data-chip-selected')) {
-                wrap.removeAttribute('data-chip-selected');
-            } else {
-                // 取消其他所有选中
-                document.querySelectorAll('.block-wrap[data-chip-selected]').forEach(function(w) { w.removeAttribute('data-chip-selected'); });
-                wrap.setAttribute('data-chip-selected', '');
-            }
+            // 单击：保持选中（不取消，双击由 dblclick 处理进入编辑）
+            document.querySelectorAll('.block-wrap[data-chip-selected]').forEach(function(w) { _dismissChipSelection(w); });
+            wrap.setAttribute('data-chip-selected', '');
             return;
         }
         // 点击其他地方 → 取消所有 chip 选中
-        document.querySelectorAll('.block-wrap[data-chip-selected]').forEach(function(w) { w.removeAttribute('data-chip-selected'); });
+        document.querySelectorAll('.block-wrap[data-chip-selected]').forEach(function(w) { _dismissChipSelection(w); });
     });
+    // 双击 chip → 进入编辑模式
+    document.addEventListener('dblclick', function(e) {
+        var chip = e.target.closest('.char-chip');
+        if (!chip) return;
+        e.stopPropagation();
+        var wrap = chip.closest('.block-wrap');
+        if (!wrap) return;
+        // 确保已选中
+        document.querySelectorAll('.block-wrap[data-chip-selected]').forEach(function(w) { _dismissChipSelection(w); });
+        wrap.setAttribute('data-chip-selected', '');
+        wrap.setAttribute('data-chip-editing', '');
+        chip.setAttribute('contenteditable', 'true');
+        chip.focus();
+        var r = document.createRange();
+        r.selectNodeContents(chip);
+        var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+    });
+
+    // Helper: 清除 chip 选中 + 编辑状态
+    function _dismissChipSelection(wrap) {
+        wrap.removeAttribute('data-chip-selected');
+        if (wrap.hasAttribute('data-chip-editing')) {
+            wrap.removeAttribute('data-chip-editing');
+            var chip = wrap.querySelector('.char-chip');
+            if (chip) chip.removeAttribute('contenteditable');
+        }
+    }
 
     // 键盘事件：chip 选中态 + Cmd+Enter 插入 / Backspace 删除
     document.addEventListener('keydown', function(e) {
@@ -2270,7 +2443,42 @@
         if (selectedWrap) {
             var selScene = selectedWrap.dataset.scene;
             var selIdx = parseInt(selectedWrap.dataset.block);
+            var isEditingChip = selectedWrap.hasAttribute('data-chip-editing');
 
+            // ── 编辑模式（新对话创建后：chip 可编辑 → Enter 跳到 modifier）──
+            if (isEditingChip) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    var chip = selectedWrap.querySelector('.char-chip');
+                    if (chip) {
+                        chip.removeAttribute('contenteditable');
+                        send({ action:'updateBlockChipCharacter', payload:{ scene:selScene, blockIndex:selIdx, character:chip.textContent.trim() } });
+                    }
+                    selectedWrap.removeAttribute('data-chip-editing');
+                    selectedWrap.removeAttribute('data-chip-selected');
+                    // 焦点跳到 modifier
+                    var mod = selectedWrap.querySelector('.tl-char-mod');
+                    if (mod) {
+                        mod.focus();
+                        var r = document.createRange();
+                        r.selectNodeContents(mod); r.collapse(false);
+                        var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+                    }
+                    return;
+                }
+                if (e.key === 'Escape') {
+                    // 取消编辑，保持 chip 选中
+                    e.preventDefault();
+                    var chip = selectedWrap.querySelector('.char-chip');
+                    if (chip) chip.removeAttribute('contenteditable');
+                    selectedWrap.removeAttribute('data-chip-editing');
+                    return;
+                }
+                // 其他键 → 透传给 contenteditable chip 处理
+                return;
+            }
+
+            // ── 非编辑模式（手动点击 chip 选中）──
             if (e.key === 'Enter' && !e.metaKey) {
                 // Enter → 上方插入空 action，保持 chip 选中
                 e.preventDefault();
@@ -2298,6 +2506,26 @@
             return;
         }
 
+        // ── Modifier Enter → 跳到台词内容 ──
+        if (e.key === 'Enter' && !e.metaKey && !e.shiftKey) {
+            var mod = document.activeElement;
+            if (mod && mod.classList.contains('tl-char-mod')) {
+                e.preventDefault();
+                mod.blur();
+                var mWrap = mod.closest('.block-wrap');
+                if (mWrap) {
+                    var dialogueContent = mWrap.querySelector('.tl-dialogue-text .tl-content');
+                    if (dialogueContent) {
+                        dialogueContent.focus();
+                        var r = document.createRange();
+                        r.selectNodeContents(dialogueContent); r.collapse(false);
+                        var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+                    }
+                }
+                return;
+            }
+        }
+
         // ── 普通编辑键盘 ──
         var el = document.activeElement;
         if (!el || !el.classList.contains('tl-content')) return;
@@ -2307,12 +2535,13 @@
         var blockIdx = parseInt(wrap.dataset.block);
         var type = wrap.dataset.type;
 
-        // Cmd+Enter → 在当前块下方插入空 action 并聚焦
+        // Cmd+Enter → 在当前块下方插入相反类型元素（action ↔ dialogue）
         if (e.metaKey && e.key === 'Enter') {
             e.preventDefault();
             e.stopPropagation();
             el.blur();
-            send({ action:'insertBlock', payload:{ scene:sceneNum, afterBlock:blockIdx, type:'action' } });
+            var newType = (type === 'dialogue') ? 'action' : 'dialogue';
+            send({ action:'insertBlock', payload:{ scene:sceneNum, afterBlock:blockIdx, type:newType } });
             return;
         }
 
@@ -2321,13 +2550,15 @@
             var blkText = el.textContent || '';
 
             // Case 1: 有内容 + 光标在开头 → 合并到上一个块
+            // dialogue 永不合并（保持独立块）
             if (blkText.length > 0 && isAtStart(el)) {
+                if (type === 'dialogue') return;
                 var prevBlock = getPrevBlock(el);
                 if (!prevBlock) return; // 场景第一块,无法合并
                 e.preventDefault();
                 var prevText = prevBlock.textContent || '';
                 prevBlock.textContent = prevText + blkText;
-                focusBlockEnd(prevBlock);
+                focusBlockAt(prevBlock, prevText.length);
                 wrap.parentNode.removeChild(wrap);
                 reindexSceneBlocks(sceneNum);
                 send({ action:'mergeWithPreviousBlock', payload:{ scene:sceneNum, blockIndex:blockIdx } });
@@ -2352,60 +2583,62 @@
             return;
         }
 
-        // ── Arrow keys: 在可编辑块之间导航 ──
+        // ── Arrow keys: Word 式跨行导航（保持水平位置）──
         if (e.key === 'ArrowDown') {
-            if (isAtContentEnd(el)) {
+            var cursorOffset = getCursorOffset(el);
+            var next = getNextBlock(el);
+            if (next) {
                 e.preventDefault();
-                var next = getNextBlock(el);
-                if (next) focusBlockStart(next);
+                focusBlockAt(next, cursorOffset);
             }
             return;
         }
         if (e.key === 'ArrowUp') {
-            if (isAtContentStart(el)) {
+            var cursorOffset = getCursorOffset(el);
+            var prev = getPrevBlock(el);
+            if (prev) {
                 e.preventDefault();
-                var prev = getPrevBlock(el);
-                if (prev) focusBlockEnd(prev);
+                focusBlockAt(prev, cursorOffset);
             }
             return;
         }
 
-        // ── Enter: 在光标处拆分为两个块 ──
+        // ── Enter: action 块按 Word 方式拆分（dialogue 行为待定义）──
         if (e.key === 'Enter' && !e.metaKey && !e.isComposing) {
-            e.preventDefault();
-            var cursorOffset = getCursorOffset(el);
-            var fullText = el.textContent || '';
-            var beforeText = fullText.substring(0, cursorOffset);
-            var afterText = fullText.substring(cursorOffset);
-
-            // 乐观更新：当前块只保留前半部分
-            el.textContent = beforeText;
-            focusBlockEnd(el);
-
-            // 构建新块 DOM
-            var newWrap = document.createElement('div');
-            newWrap.className = 'block-wrap';
-            newWrap.setAttribute('data-scene', sceneNum);
-            newWrap.setAttribute('data-type', type);
+            // 仅 action 块支持 Enter 拆分（Word-style）
             if (type === 'action') {
-                newWrap.innerHTML = '<div class="tl-block tl-action"><span class="tl-block-icon">📝</span><div class="tl-content" contenteditable="true">' + escHTML(afterText) + '</div></div>';
-            } else if (type === 'dialogue') {
-                var origChip = wrap.querySelector('.char-chip');
-                var chipHTML = origChip ? origChip.outerHTML : '';
-                var origMod = wrap.querySelector('.tl-char-mod');
-                var modHTML = origMod ? origMod.outerHTML : '';
-                newWrap.innerHTML = '<div class="tl-block tl-dialogue"><span class="tl-block-icon">👤</span>' + chipHTML + modHTML + '</div><div class="tl-block tl-dialogue-text"><span class="tl-block-icon">💬</span><div class="tl-content" contenteditable="true">' + escHTML(afterText) + '</div></div>';
-            } else {
-                newWrap.innerHTML = '<div class="tl-block tl-action" style="color:#888;font-style:italic;"><span class="tl-block-icon">💬</span><div class="tl-content" contenteditable="true">' + escHTML(afterText) + '</div></div>';
+                e.preventDefault();
+                var cursorOffset = getCursorOffset(el);
+                var fullText = el.textContent || '';
+                var beforeText = fullText.substring(0, cursorOffset);
+                var afterText = fullText.substring(cursorOffset);
+
+                // 乐观更新：当前块只保留前半部分
+                el.textContent = beforeText;
+                focusBlockEnd(el);
+
+                // 构建新 action 块 DOM
+                var newWrap = document.createElement('div');
+                newWrap.className = 'block-wrap';
+                newWrap.setAttribute('data-scene', sceneNum);
+                newWrap.setAttribute('data-type', 'action');
+                newWrap.innerHTML = '<div class="tl-block tl-action"><div class="tl-content" contenteditable="true">' + escHTML(afterText) + '</div></div>';
+                wrap.parentNode.insertBefore(newWrap, wrap.nextSibling);
+                reindexSceneBlocks(sceneNum);
+
+                // 聚焦新块头部
+                var newContent = newWrap.querySelector('.tl-content');
+                if (newContent) focusBlockStart(newContent);
+
+                send({ action:'splitBlock', payload:{ scene:sceneNum, blockIndex:blockIdx, beforeText:beforeText, afterText:afterText } });
             }
-            wrap.parentNode.insertBefore(newWrap, wrap.nextSibling);
-            reindexSceneBlocks(sceneNum);
-
-            // 聚焦新块
-            var newContent = newWrap.querySelector('.tl-content');
-            if (newContent) focusBlockStart(newContent);
-
-            send({ action:'splitBlock', payload:{ scene:sceneNum, blockIndex:blockIdx, beforeText:beforeText, afterText:afterText } });
+            // dialogue: Enter → 下方插入空 dialogue（同角色、同修饰语，台词为空）
+            if (type === 'dialogue') {
+                e.preventDefault();
+                el.blur();
+                send({ action:'insertBlockBelow', payload:{ scene:sceneNum, blockIndex:blockIdx, copyCharacter:true } });
+                return;
+            }
             return;
         }
 

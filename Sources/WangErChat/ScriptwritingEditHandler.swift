@@ -5,7 +5,7 @@ import SWS
 
 enum ScriptwritingPostEditAction {
     case reRender
-    case focusBlock(scene: String, blockIndex: Int)
+    case focusBlock(scene: String, blockIndex: Int, atEnd: Bool = false, cursorOffset: Int? = nil)
     case focusBlockChipSelected(scene: String, blockIndex: Int)
 }
 
@@ -25,9 +25,10 @@ enum ScriptwritingEditHandler {
     // MARK: - Edit 消息分发
 
     static let editActions: Set<String> = [
-        "updateHeading", "updateBlock", "insertBlock",
+        "updateHeading", "updateBlock", "updateModifier", "insertBlock",
         "deleteBlock", "insertBlockBefore", "deletePairAndFocusPrevious",
-        "splitBlock", "mergeWithPreviousBlock"
+        "splitBlock", "mergeWithPreviousBlock", "insertBlockBelow",
+        "updateBlockChipCharacter"
     ]
 
     static func isEditAction(_ action: String) -> Bool {
@@ -38,12 +39,15 @@ enum ScriptwritingEditHandler {
         switch action {
         case "updateHeading": return applyUpdateHeading(body, document: document)
         case "updateBlock": return applyUpdateBlock(body, document: document)
+        case "updateModifier": return applyUpdateModifier(body, document: document)
         case "insertBlock": return applyInsertBlock(body, document: document)
         case "deleteBlock": return applyDeleteBlock(body, document: document)
         case "insertBlockBefore": return applyInsertBlockBefore(body, document: document)
         case "deletePairAndFocusPrevious": return applyDeletePairAndFocusPrevious(body, document: document)
         case "splitBlock": return applySplitBlock(body, document: document)
         case "mergeWithPreviousBlock": return applyMergeWithPrevious(body, document: document)
+        case "insertBlockBelow": return applyInsertBlockBelow(body, document: document)
+        case "updateBlockChipCharacter": return applyUpdateBlockChipCharacter(body, document: document)
         default: return .noChange
         }
     }
@@ -159,6 +163,24 @@ enum ScriptwritingEditHandler {
         return .updated(SWSDocument(metadata: document.metadata, scenes: scenes), postActions: [])
     }
 
+    private static func applyUpdateModifier(_ body: [String: Any], document: SWSDocument) -> ScriptwritingEditResult {
+        guard let sceneNum = body["scene"] as? String,
+              let blockIdx = body["blockIndex"] as? Int,
+              let value = body["value"] as? String else { return .noChange }
+        guard let sceneIdx = document.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return .noChange }
+        var scene = document.scenes[sceneIdx]
+        guard blockIdx < scene.blocks.count else { return .noChange }
+        var blocks = scene.blocks
+        guard case .dialogue(let d) = blocks[blockIdx] else { return .noChange }
+        let trimmed = value.trimmingCharacters(in: .whitespaces)
+        let newModifier: String? = trimmed.isEmpty ? nil : trimmed
+        blocks[blockIdx] = .dialogue(SWSDialogueBlock(character: d.character, modifier: newModifier, line: d.line))
+        scene = SWSScene(heading: scene.heading, blocks: blocks)
+        var scenes = document.scenes
+        scenes[sceneIdx] = scene
+        return .updated(SWSDocument(metadata: document.metadata, scenes: scenes), postActions: [])
+    }
+
     private static func applyInsertBlock(_ body: [String: Any], document: SWSDocument) -> ScriptwritingEditResult {
         guard let sceneNum = body["scene"] as? String,
               let afterBlock = body["afterBlock"] as? Int else { return .noChange }
@@ -167,13 +189,24 @@ enum ScriptwritingEditHandler {
 
         var blocks = scene.blocks
         let insertIdx = min(afterBlock + 1, blocks.count)
-        blocks.insert(.action(SWSActionBlock(text: "")), at: insertIdx)
+        let blockType = body["type"] as? String
+        if blockType == "dialogue" {
+            blocks.insert(.dialogue(SWSDialogueBlock(character: "", modifier: nil, line: "")), at: insertIdx)
+        } else {
+            blocks.insert(.action(SWSActionBlock(text: "")), at: insertIdx)
+        }
 
         scene = SWSScene(heading: scene.heading, blocks: blocks)
         var scenes = document.scenes
         scenes[sceneIdx] = scene
+        let postActions: [ScriptwritingPostEditAction]
+        if blockType == "dialogue" {
+            postActions = [.reRender, .focusBlockChipSelected(scene: sceneNum, blockIndex: insertIdx)]
+        } else {
+            postActions = [.reRender, .focusBlock(scene: sceneNum, blockIndex: insertIdx)]
+        }
         return .updated(SWSDocument(metadata: document.metadata, scenes: scenes),
-                        postActions: [.reRender, .focusBlock(scene: sceneNum, blockIndex: insertIdx)])
+                        postActions: postActions)
     }
 
     private static func applyDeleteBlock(_ body: [String: Any], document: SWSDocument) -> ScriptwritingEditResult {
@@ -272,6 +305,52 @@ enum ScriptwritingEditHandler {
                         postActions: [.focusBlock(scene: sceneNum, blockIndex: blockIdx + 1)])
     }
 
+    /// Enter in dialogue → 下方插入空 dialogue（同角色、同修饰语，台词为空）
+    private static func applyInsertBlockBelow(_ body: [String: Any], document: SWSDocument) -> ScriptwritingEditResult {
+        guard let sceneNum = body["scene"] as? String,
+              let blockIdx = body["blockIndex"] as? Int else { return .noChange }
+        guard let sceneIdx = document.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return .noChange }
+        var scene = document.scenes[sceneIdx]
+        guard blockIdx < scene.blocks.count else { return .noChange }
+
+        var blocks = scene.blocks
+        let insertIdx = blockIdx + 1
+
+        // 复制当前块的角色和修饰语，创建空 dialogue
+        let block = blocks[blockIdx]
+        if case .dialogue(let d) = block {
+            blocks.insert(.dialogue(SWSDialogueBlock(character: "", modifier: nil, line: "")), at: insertIdx)
+        } else {
+            // 非 dialogue 降级为 action
+            blocks.insert(.action(SWSActionBlock(text: "")), at: insertIdx)
+        }
+
+        scene = SWSScene(heading: scene.heading, blocks: blocks)
+        var scenes = document.scenes
+        scenes[sceneIdx] = scene
+        return .updated(SWSDocument(metadata: document.metadata, scenes: scenes),
+                        postActions: [.reRender, .focusBlockChipSelected(scene: sceneNum, blockIndex: insertIdx)])
+    }
+
+    /// 更新 dialogue 块的角色名（chip 编辑）
+    private static func applyUpdateBlockChipCharacter(_ body: [String: Any], document: SWSDocument) -> ScriptwritingEditResult {
+        guard let sceneNum = body["scene"] as? String,
+              let blockIdx = body["blockIndex"] as? Int,
+              let character = body["character"] as? String else { return .noChange }
+        guard let sceneIdx = document.scenes.firstIndex(where: { $0.heading?.number == sceneNum }) else { return .noChange }
+        var scene = document.scenes[sceneIdx]
+        guard blockIdx < scene.blocks.count else { return .noChange }
+        var blocks = scene.blocks
+        guard case .dialogue(let d) = blocks[blockIdx] else { return .noChange }
+        let trimmed = character.trimmingCharacters(in: .whitespaces)
+        let newChar = trimmed.isEmpty ? "" : trimmed
+        blocks[blockIdx] = .dialogue(SWSDialogueBlock(character: newChar, modifier: d.modifier, line: d.line))
+        scene = SWSScene(heading: scene.heading, blocks: blocks)
+        var scenes = document.scenes
+        scenes[sceneIdx] = scene
+        return .updated(SWSDocument(metadata: document.metadata, scenes: scenes), postActions: [])
+    }
+
     /// Backspace 在块开头合并到上一个块（JS 已乐观更新 DOM）
     private static func applyMergeWithPrevious(_ body: [String: Any], document: SWSDocument) -> ScriptwritingEditResult {
         guard let sceneNum = body["scene"] as? String,
@@ -299,6 +378,9 @@ enum ScriptwritingEditHandler {
         case .unattributed(let u): currText = u.lines.joined(separator: "\n")
         }
 
+        // 记录光标应在的交接位置（上一块原文末尾）
+        let mergeOffset = prevText.count
+
         // 同类型合并保留结构，否则降级为 action
         switch (prevBlock, currBlock) {
         case (.action, .action):
@@ -317,6 +399,6 @@ enum ScriptwritingEditHandler {
         var scenes = document.scenes
         scenes[sceneIdx] = scene
         return .updated(SWSDocument(metadata: document.metadata, scenes: scenes),
-                        postActions: [.focusBlock(scene: sceneNum, blockIndex: blockIdx - 1)])
+                        postActions: [.focusBlock(scene: sceneNum, blockIndex: blockIdx - 1, cursorOffset: mergeOffset)])
     }
 }
