@@ -1827,12 +1827,12 @@
                         var charColor = charColors[blk.character] || '#999';
                         cardHTML += '<div class="block-wrap" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-type="dialogue">';
                         cardHTML += '<div class="tl-block tl-dialogue">';
-                        cardHTML += '<span class="tl-block-icon">👤</span>';
+
                         cardHTML += '<span class="char-chip" data-scene="' + sc.number + '" data-block="' + blkIdx + '" data-character="' + escHTML(blk.character || '') + '" style="background:' + charColor + '18;color:' + charColor + ';">' + escHTML(blk.character || '') + '</span>';
                         cardHTML += '（<span class="tl-char-mod" contenteditable="true">' + escHTML(blk.modifier || '') + '</span>）';
                         cardHTML += '</div>';
                         cardHTML += '<div class="tl-block tl-dialogue-text">';
-                        cardHTML += '<span class="tl-block-icon">💬</span>';
+
                         cardHTML += '<div class="tl-content" contenteditable="true">' + escHTML(blk.line || '') + '</div>';
                         cardHTML += '</div></div>';
                         blkIdx++;
@@ -2192,6 +2192,15 @@
 
     // ===== 可编辑元素事件处理 =====
 
+    // Track last focused tl-content for chip-selected keypress restore (HP #3 fix)
+    var _lastFocusedContent = null;
+    document.addEventListener('focusin', function(e) {
+        var el = e.target;
+        if (el.classList.contains('tl-content')) {
+            _lastFocusedContent = el;
+        }
+    });
+
     // Focusout → push edit to Swift (safety net; primary path is real-time input handler)
     document.addEventListener('focusout', function(e) {
         var el = e.target;
@@ -2232,7 +2241,20 @@
                     character: el.textContent.trim()
                 }
             });
-        } else if (el.classList.contains('tl-content')) {
+        }
+        // HP #1 fix: focusout 时若焦点不在任何选中的 wrap 内，清除 chip-selected
+        var wraps = document.querySelectorAll('.block-wrap[data-chip-selected]');
+        if (wraps.length) {
+            var related = e.relatedTarget;
+            var insideAny = false;
+            wraps.forEach(function(w) {
+                if (w.contains(related)) insideAny = true;
+            });
+            if (!insideAny && !(related && related.closest && related.closest('.char-chip'))) {
+                wraps.forEach(function(w) { _dismissChipSelection(w); });
+            }
+        }
+        if (el.classList.contains('tl-content')) {
             var wrap = el.closest('.block-wrap');
             if (!wrap) return;
             window.__bridgeSend({
@@ -2493,14 +2515,14 @@
                 return;
             }
 
-            // 其他任意键 → 取消选中，光标进入台词内容
+            // 其他任意键 → 取消选中，恢复到之前的编辑位置
             e.preventDefault();
             selectedWrap.removeAttribute('data-chip-selected');
-            var content = selectedWrap.querySelector('.tl-content');
-            if (content) {
-                content.focus();
+            var target = _lastFocusedContent || selectedWrap.querySelector('.tl-content');
+            if (target) {
+                target.focus();
                 var r = document.createRange();
-                r.selectNodeContents(content); r.collapse(false);
+                r.selectNodeContents(target); r.collapse(false);
                 var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
             }
             return;
@@ -2551,10 +2573,13 @@
 
             // Case 1: 有内容 + 光标在开头 → 合并到上一个块
             // dialogue 永不合并（保持独立块）
+            // action 也不合并到 dialogue（action 内容不该进入 dialogue）
             if (blkText.length > 0 && isAtStart(el)) {
                 if (type === 'dialogue') return;
                 var prevBlock = getPrevBlock(el);
                 if (!prevBlock) return; // 场景第一块,无法合并
+                var prevWrap = prevBlock.closest('.block-wrap');
+                if (prevWrap && prevWrap.dataset.type === 'dialogue') return;
                 e.preventDefault();
                 var prevText = prevBlock.textContent || '';
                 prevBlock.textContent = prevText + blkText;
