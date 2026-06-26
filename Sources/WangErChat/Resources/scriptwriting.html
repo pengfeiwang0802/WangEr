@@ -2467,9 +2467,28 @@
             var selIdx = parseInt(selectedWrap.dataset.block);
             var isEditingChip = selectedWrap.hasAttribute('data-chip-editing');
 
-            // ── 编辑模式（新对话创建后：chip 可编辑 → Enter 跳到 modifier）──
+            // ── 编辑模式（新对话创建后：chip 可编辑 → Enter/Tab 跳到 modifier）──
             if (isEditingChip) {
                 if (e.key === 'Enter') {
+                    e.preventDefault();
+                    var chip = selectedWrap.querySelector('.char-chip');
+                    if (chip) {
+                        chip.removeAttribute('contenteditable');
+                        send({ action:'updateBlockChipCharacter', payload:{ scene:selScene, blockIndex:selIdx, character:chip.textContent.trim() } });
+                    }
+                    selectedWrap.removeAttribute('data-chip-editing');
+                    selectedWrap.removeAttribute('data-chip-selected');
+                    // 焦点跳到 modifier
+                    var mod = selectedWrap.querySelector('.tl-char-mod');
+                    if (mod) {
+                        mod.focus();
+                        var r = document.createRange();
+                        r.selectNodeContents(mod); r.collapse(false);
+                        var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+                    }
+                    return;
+                }
+                if (e.key === 'Tab') {
                     e.preventDefault();
                     var chip = selectedWrap.querySelector('.char-chip');
                     if (chip) {
