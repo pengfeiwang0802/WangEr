@@ -292,8 +292,15 @@ class ScriptwritingPlugin: NSObject, WangErPlugin, WKNavigationDelegate {
         }
         print("[PluginManager] renderCurrentDocument: webView OK, isPageLoaded=\(isPageLoaded), scenes=\(document.scenes.count)")
 
-        // 生成角色→颜色映射（全局一致，跨场景同角色同色）
-        let characterColors = SWSRenderer.buildCharacterColorMap(document: document)
+        // 角色→颜色映射：只使用项目角色表中定义的颜色，未在角色表中的角色显示为灰色(#999)
+        var characterColors: [String: String] = [:]
+        if let proj = projectManager.project {
+            for char in proj.characters {
+                if let color = char.color, !color.isEmpty {
+                    characterColors[char.name] = color
+                }
+            }
+        }
 
         let bodyHTML = SWSRenderer.renderBody(document: document, style: currentStyle, characterColors: characterColors)
         let fullHTML = SWSRenderer.render(document: document, style: currentStyle, characterColors: characterColors)
@@ -906,6 +913,17 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
                 }
             }
         }
+
+        // chip 角色名变更后，推送更新后的颜色映射（无需全量 re-render）
+        if action == "updateBlockChipCharacter" {
+            var colorMap: [String: String] = [:]
+            if let proj = projectManager.project {
+                for c in proj.characters {
+                    if let clr = c.color, !clr.isEmpty { colorMap[c.name] = clr }
+                }
+            }
+            bridgeSend(action: "updateCharacterColors", payload: ["colors": colorMap])
+        }
     }
 
     private func handleProjectAction(_ action: String, payload: [String: Any], msgId: String) {
@@ -918,9 +936,10 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
             if let text = payload["content"] as? String { mgr.updateScript(text) }
         case "updateCharacter":
             if let id = payload["id"] as? String {
-                mgr.updateCharacter(id: id, name: payload["name"] as? String, tagline: payload["tagline"] as? String, bio: payload["bio"] as? String, avatar: payload["avatar"] as? String)
+                mgr.updateCharacter(id: id, name: payload["name"] as? String, tagline: payload["tagline"] as? String, bio: payload["bio"] as? String, avatar: payload["avatar"] as? String, color: payload["color"] as? String)
                 try? mgr.save()
                 pushProjectToWebView()
+                renderCurrentDocument()
             }
         case "updateScene":
             if let id = payload["id"] as? String {
@@ -928,15 +947,17 @@ extension ScriptwritingPlugin: WKScriptMessageHandler {
             }
         case "addCharacter":
             if let name = payload["name"] as? String {
-                mgr.addCharacter(name: name, avatar: payload["avatar"] as? String, tagline: payload["tagline"] as? String, bio: payload["bio"] as? String)
+                mgr.addCharacter(name: name, avatar: payload["avatar"] as? String, tagline: payload["tagline"] as? String, bio: payload["bio"] as? String, color: payload["color"] as? String)
                 try? mgr.save()
                 pushProjectToWebView()
+                renderCurrentDocument()
             }
         case "deleteCharacter":
             if let id = payload["id"] as? String {
                 mgr.deleteCharacter(id: id)
                 try? mgr.save()
                 pushProjectToWebView()
+                renderCurrentDocument()
             }
         case "addScene":
             if let title = payload["title"] as? String {

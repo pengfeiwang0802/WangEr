@@ -597,6 +597,33 @@
             filter: brightness(1.1);
         }
 
+        /* ---- color picker ---- */
+        .color-palette {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 4px;
+        }
+        .color-palette .color-opt {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            border: 2px solid transparent;
+            cursor: pointer;
+            transition: all 0.12s;
+            flex-shrink: 0;
+            position: relative;
+        }
+        .color-palette .color-opt:hover {
+            transform: scale(1.18);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+        .color-palette .color-opt.selected {
+            border-color: var(--text-primary);
+            transform: scale(1.12);
+            box-shadow: 0 0 0 2px var(--bg-primary), 0 0 0 4px currentColor;
+        }
+
         /* ---- avatar picker ---- */
         .avatar-palette {
             display: flex;
@@ -1238,6 +1265,7 @@
             case 'loadSidebar':     return _bridgeLoadSidebar(payload);
             case 'focusBlock':      return _bridgeFocusBlock(payload);
             case 'focusBlockChipSelected': return _bridgeFocusBlockChipSelected(payload);
+            case 'updateCharacterColors': return _bridgeUpdateCharacterColors(payload);
             default:
                 console.warn('[bridge] unknown action:', action);
         }
@@ -1344,6 +1372,16 @@
 
     function _bridgeFocusBlockChipSelected(payload) {
         _applyFocusChip(payload.scene, payload.blockIndex);
+    }
+
+    function _bridgeUpdateCharacterColors(payload) {
+        // 非破坏性更新：根据项目角色颜色刷新所有 char-chip 颜色，不替换 DOM
+        var colorMap = payload.colors || {};
+        var chips = document.querySelectorAll('.char-chip');
+        for (var i = 0; i < chips.length; i++) {
+            var name = (chips[i].textContent || '').trim();
+            chips[i].style.color = colorMap[name] || '#999';
+        }
     }
 
     // ===== 模式切换（时间轴 / 剧本） =====
@@ -1886,12 +1924,12 @@
             var name = typeof charObj === 'string' ? charObj : (charObj.name || '');
             var id = typeof charObj === 'string' ? 'char-str-' + idx : (charObj.id || 'char-' + idx);
             var avatar = (charObj.avatar) || defaultAvatars[idx % defaultAvatars.length];
-            var color = (charObj.color) || (window._projectData && window._projectData.characterColors && window._projectData.characterColors[name]) || '#999';
+            var color = (charObj.color) || '#000000';
             var tagline = (charObj.tagline) || '';
             charHTML += '<div class="char-item" data-char-id="' + id + '" data-char-name="' + escHTML(name) + '">';
             charHTML += '<div class="avatar" style="background:' + color + '22;color:' + color + ';">' + avatar + '</div>';
             charHTML += '<div class="info">';
-            charHTML += '<div class="name">' + escHTML(name) + '</div>';
+            charHTML += '<div class="name" style="color:' + color + ';">' + escHTML(name) + '</div>';
             charHTML += '<div class="role">' + (tagline ? escHTML(tagline) : '角色') + '</div>';
             charHTML += '</div></div>';
         });
@@ -1905,6 +1943,27 @@
 
     // ===== 角色 Modal（添加 / 编辑共用） =====
     var AVATAR_PALETTE = ['🧔','👨','👩','👴','🧑','🦸','🦹','🧙','🧛','👼','😎','🤠','👑','🎭','🐱','🐶','🦊','🐰','🤖','👻','🌟','🐲','🐼','🐨','🦄','🐙','🦋','🌸','🔥','💎','🎵','⚡'];
+    var CHAR_COLORS = ['#000000','#e94560','#d4920a','#3b82f6','#22c55e','#8b5cf6','#f97316','#ec4899','#06b6d4','#6b7280','#ef4444','#84cc16','#a855f7','#14b8a6','#78716c'];
+
+    window._buildColorPalette = function(selected) {
+        var palette = document.getElementById('color-palette');
+        if (!palette) return;
+        palette.innerHTML = '';
+        CHAR_COLORS.forEach(function(hex) {
+            var opt = document.createElement('span');
+            opt.className = 'color-opt' + (hex === selected ? ' selected' : '');
+            opt.style.backgroundColor = hex;
+            opt.style.color = hex;
+            opt.title = hex;
+            opt.addEventListener('click', function() {
+                palette.querySelectorAll('.color-opt').forEach(function(o) { o.classList.remove('selected'); });
+                opt.classList.add('selected');
+                var hidden = document.getElementById('add-char-color');
+                if (hidden) hidden.value = hex;
+            });
+            palette.appendChild(opt);
+        });
+    };
 
     window._buildAvatarPalette = function(selected) {
         var palette = document.getElementById('avatar-palette');
@@ -1933,10 +1992,12 @@
         var titleEl = document.getElementById('char-modal-title');
         var hiddenId = document.getElementById('edit-char-id');
         var hiddenAvatar = document.getElementById('add-char-avatar');
+        var hiddenColor = document.getElementById('add-char-color');
         if (!modal || !nameInput) return;
         // 重置为添加模式
         if (hiddenId) hiddenId.value = '';
         if (hiddenAvatar) hiddenAvatar.value = '';
+        if (hiddenColor) hiddenColor.value = '#000000';
         nameInput.value = '';
         if (taglineInput) taglineInput.value = '';
         if (bioInput) bioInput.value = '';
@@ -1947,6 +2008,7 @@
         }
         if (titleEl) titleEl.textContent = '👤 添加角色';
         window._buildAvatarPalette('');
+        window._buildColorPalette('#000000');
         modal.classList.add('open');
         setTimeout(function() { nameInput.focus(); }, 50);
     };
@@ -1967,6 +2029,7 @@
         var titleEl = document.getElementById('char-modal-title');
         var hiddenId = document.getElementById('edit-char-id');
         var hiddenAvatar = document.getElementById('add-char-avatar');
+        var hiddenColor = document.getElementById('add-char-color');
         if (!modal || !nameInput) return;
 
         if (hiddenId) hiddenId.value = charId;
@@ -1974,7 +2037,9 @@
         if (taglineInput) taglineInput.value = found.tagline || '';
         if (bioInput) bioInput.value = found.bio || '';
         var avatar = found.avatar || '';
+        var color = found.color || '#000000';
         if (hiddenAvatar) hiddenAvatar.value = avatar;
+        if (hiddenColor) hiddenColor.value = color;
         if (confirmBtn) {
             confirmBtn.disabled = !nameInput.value.trim();
             confirmBtn.textContent = '保存';
@@ -1982,6 +2047,7 @@
         }
         if (titleEl) titleEl.textContent = '✏️ 编辑角色';
         window._buildAvatarPalette(avatar);
+        window._buildColorPalette(color);
         modal.classList.add('open');
         setTimeout(function() { nameInput.focus(); nameInput.select(); }, 50);
     };
@@ -1996,18 +2062,21 @@
         var taglineInput = document.getElementById('add-char-tagline');
         var bioInput = document.getElementById('add-char-bio');
         var avatarInput = document.getElementById('add-char-avatar');
+        var colorInput = document.getElementById('add-char-color');
         var editId = document.getElementById('edit-char-id');
         var name = nameInput ? nameInput.value.trim() : '';
         if (!name) return;
         var tagline = taglineInput ? taglineInput.value.trim() : '';
         var bio = bioInput ? bioInput.value.trim() : '';
         var avatar = avatarInput ? avatarInput.value : '';
+        var color = colorInput ? colorInput.value : '#000000';
         var charId = editId ? editId.value : '';
 
         var pl = { name: name };
         if (tagline) pl.tagline = tagline;
         if (bio) pl.bio = bio;
         if (avatar) pl.avatar = avatar;
+        pl.color = color;
 
         if (charId) {
             // 编辑模式
@@ -2790,6 +2859,10 @@
             <div class="avatar-palette" id="avatar-palette"></div>
         </div>
         <div class="field">
+            <label>角色颜色</label>
+            <div class="color-palette" id="color-palette"></div>
+        </div>
+        <div class="field">
             <label>角色名称 <span style="color:var(--accent);">*</span></label>
             <input type="text" id="add-char-name" placeholder="例如：张伟" autofocus />
         </div>
@@ -2802,6 +2875,7 @@
             <textarea id="add-char-bio" placeholder="写写这个角色的背景、性格、动机…" style="min-height:120px;"></textarea>
         </div>
         <input type="hidden" id="add-char-avatar" value="" />
+        <input type="hidden" id="add-char-color" value="#000000" />
         <input type="hidden" id="edit-char-id" value="" />
         <div class="modal-actions">
             <button class="btn-cancel" id="add-char-cancel">取消</button>

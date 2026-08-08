@@ -423,13 +423,14 @@ final class SWSProjectManager {
         return try buildGroups(allIDs)
     }
 
-    func updateCharacter(id: String, name: String? = nil, tagline: String? = nil, bio: String? = nil, avatar: String? = nil) {
+    func updateCharacter(id: String, name: String? = nil, tagline: String? = nil, bio: String? = nil, avatar: String? = nil, color: String? = nil) {
         guard var proj = project,
               let i = proj.characters.firstIndex(where: { $0.id == id }) else { return }
         if let name { proj.characters[i].name = name }
         if let tagline { proj.characters[i].tagline = tagline }
         if let bio { proj.characters[i].bio = bio }
         if let avatar { proj.characters[i].avatar = avatar }
+        if let color { proj.characters[i].color = color }
         project = proj
         markDirty()
     }
@@ -452,12 +453,13 @@ final class SWSProjectManager {
         markDirty()
     }
 
-    func addCharacter(name: String, avatar: String? = nil, tagline: String? = nil, bio: String? = nil) {
+    func addCharacter(name: String, avatar: String? = nil, tagline: String? = nil, bio: String? = nil, color: String? = nil) {
         guard var proj = project else { return }
         let char = SWSProjectCharacter(
             id: "char_" + UUID().uuidString.prefix(8).lowercased(),
             name: name,
             avatar: avatar,
+            color: color,
             tagline: tagline,
             bio: bio
         )
