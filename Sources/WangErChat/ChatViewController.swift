@@ -42,6 +42,7 @@ class ChatViewController: NSViewController {
     private let textScrollView = NSScrollView()
     private let sendButton = NSButton()
     private let stopButton = NSButton()
+    private let attachButton = NSButton()
 
     // 底部状态栏
     private let statusBar = NSView()
@@ -495,6 +496,9 @@ class ChatViewController: NSViewController {
         textView.drawsBackground = false
         textView.delegate = self
         textView.onCommandEnter = { [weak self] in self?.send() }
+        textView.onPasteImage = { [weak self] data, filename, mimeType in
+            self?.sendFile(data: data, filename: filename, mimeType: mimeType)
+        }
 
         // Focus input on launch
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
@@ -508,6 +512,12 @@ class ChatViewController: NSViewController {
         sendButton.action = #selector(sendMessage); sendButton.target = self
         chatContainer.addSubview(sendButton)
 
+        attachButton.translatesAutoresizingMaskIntoConstraints = false
+        attachButton.title = "📎"; attachButton.bezelStyle = .rounded
+        attachButton.toolTip = "添加附件(图片/文件)"
+        attachButton.action = #selector(pickAttachment); attachButton.target = self
+        chatContainer.addSubview(attachButton)
+
         stopButton.translatesAutoresizingMaskIntoConstraints = false
         stopButton.title = "⏹ 停止"; stopButton.bezelStyle = .rounded
         stopButton.action = #selector(stopGeneration); stopButton.target = self
@@ -520,23 +530,32 @@ class ChatViewController: NSViewController {
             webView.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -8),
             webView.bottomAnchor.constraint(equalTo: textScrollView.topAnchor, constant: -8),
 
-            // Input area at bottom, full width
+            // Input area at bottom, full width. Top edge aligns with the attach button's top edge
+            // so the whole input row and button column look vertically aligned.
             textScrollView.leadingAnchor.constraint(equalTo: chatContainer.leadingAnchor, constant: 8),
             textScrollView.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -76),
             textScrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor, constant: -8),
-            textScrollView.heightAnchor.constraint(equalToConstant: 60),
+            textScrollView.topAnchor.constraint(equalTo: attachButton.topAnchor),
 
-            // Send button to the right of the input
+            // Send button to the right of the input, bottom-aligned with the input bottom
             sendButton.leadingAnchor.constraint(equalTo: textScrollView.trailingAnchor, constant: 8),
             sendButton.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -8),
-            sendButton.bottomAnchor.constraint(equalTo: textScrollView.bottomAnchor, constant: 0),
+            sendButton.bottomAnchor.constraint(equalTo: textScrollView.bottomAnchor),
             sendButton.widthAnchor.constraint(equalToConstant: 60),
+            sendButton.heightAnchor.constraint(equalToConstant: 32),
 
-            // Stop button same position
+            // Stop button same position as send
             stopButton.leadingAnchor.constraint(equalTo: textScrollView.trailingAnchor, constant: 8),
             stopButton.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -8),
-            stopButton.bottomAnchor.constraint(equalTo: textScrollView.bottomAnchor, constant: 0),
+            stopButton.bottomAnchor.constraint(equalTo: textScrollView.bottomAnchor),
             stopButton.widthAnchor.constraint(equalToConstant: 60),
+            stopButton.heightAnchor.constraint(equalToConstant: 32),
+
+            // Attach button above the send button, same size; its top edge = input top edge
+            attachButton.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -8),
+            attachButton.bottomAnchor.constraint(equalTo: sendButton.topAnchor, constant: -8),
+            attachButton.widthAnchor.constraint(equalToConstant: 60),
+            attachButton.heightAnchor.constraint(equalToConstant: 32),
         ])
     }
 
@@ -857,6 +876,20 @@ extension ChatViewController: NSTextViewDelegate {
     }
 
     @objc func sendMessage() { send() }
+
+    /// 附件按钮: 打开文件选择面板
+    @objc func pickAttachment() {
+        guard !isGenerating else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "选择图片或文件发送"
+        panel.begin { [weak self] result in
+            guard let self = self, result == .OK, let url = panel.url else { return }
+            self.handleDroppedFile(url: url)
+        }
+    }
 
     @objc func stopGeneration() {
         streamSession?.cancel()
