@@ -1423,10 +1423,14 @@
     const btnToggleProj = document.getElementById('btn-toggle-project-sidebar');
     let projSidebarSavedWidth = null;
     btnToggleProj.addEventListener('click', () => {
+        // 读取宽度必须在 toggle 之前：offsetWidth 会强制 reflow，
+        // 若先加 .collapsed 类再读，宽度已被压成 0，存下 "0px" 导致无法还原（旧 bug）。
+        const wasCollapsed = projSidebar.classList.contains('collapsed');
+        if (!wasCollapsed) {
+            projSidebarSavedWidth = projSidebar.style.width || projSidebar.offsetWidth + 'px';
+        }
         const isCollapsed = projSidebar.classList.toggle('collapsed');
         if (isCollapsed) {
-            // store current width before collapsing to restore later
-            projSidebarSavedWidth = projSidebar.style.width || projSidebar.offsetWidth + 'px';
             projSidebar.style.width = '';
             projSidebar.style.minWidth = '';
         } else {
@@ -1656,9 +1660,14 @@
     const btnToggle = document.getElementById('btn-toggle-sidebar');
     let sidebarSavedWidth = null;
     btnToggle.addEventListener('click', () => {
+        // 读取宽度必须在 toggle 之前：offsetWidth 会强制 reflow，
+        // 若先加 .collapsed 类再读，宽度已被压成 0，存下 "0px" 导致无法还原（旧 bug）。
+        const wasCollapsed = sidebar.classList.contains('collapsed');
+        if (!wasCollapsed) {
+            sidebarSavedWidth = sidebar.style.width || sidebar.offsetWidth + 'px';
+        }
         const isCollapsed = sidebar.classList.toggle('collapsed');
         if (isCollapsed) {
-            sidebarSavedWidth = sidebar.style.width || sidebar.offsetWidth + 'px';
             sidebar.style.width = '';
             sidebar.style.minWidth = '';
         } else {
