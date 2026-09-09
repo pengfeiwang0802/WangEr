@@ -6,33 +6,11 @@ let package = Package(
     platforms: [
         .macOS(.v14)
     ],
-    products: [
-        .library(
-            name: "SWS",
-            targets: ["SWS"]
-        )
-    ],
     dependencies: [],
     targets: [
-        .target(
-            name: "SWS",
-            path: "Sources/SWS"
-        ),
         .executableTarget(
             name: "WangErChat",
-            dependencies: ["SWS"],
-            path: "Sources/WangErChat",
-            resources: [.process("Resources")]
-        ),
-        .testTarget(
-            name: "WangErChatTests",
-            dependencies: ["SWS"],
-            path: "Tests/WangErChatTests"
-        ),
-        .executableTarget(
-            name: "sws-tool",
-            dependencies: ["SWS"],
-            path: "Tools/sws-tool"
+            path: "Sources/WangErChat"
         )
     ]
 )
