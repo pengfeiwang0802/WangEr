@@ -60,6 +60,18 @@ extension ChatViewController {
     }
 }
 
+// MARK: - WKNavigationDelegate (聊天 WebView 加载完成回调)
+extension ChatViewController: WKNavigationDelegate {
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // 仅处理聊天 WebView(虚拟形象的导航由 AvatarManager 自己处理)
+        guard webView === self.chatWebView else { return }
+        if let restore = pendingRestore {
+            pendingRestore = nil
+            restore()
+        }
+    }
+}
+
 // MARK: - WKUIDelegate (拦截文件拖拽到 WKWebView)
 extension ChatViewController: WKUIDelegate {
     func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {

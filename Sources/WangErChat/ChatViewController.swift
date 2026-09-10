@@ -32,6 +32,11 @@ class ChatViewController: NSViewController {
         config.userContentController = userController
         return WKWebView(frame: .zero, configuration: config)
     }()
+    /// 待执行的会话恢复逻辑:等 WebView 真正加载完成后(didFinish)才注入历史消息,
+    /// 避免 loadHTMLString 异步加载竞态导致注入丢失 / 滚动被重置到顶部
+    var pendingRestore: (() -> Void)?
+    /// 供 WebKit 扩展访问聊天 WebView(区分虚拟形象 WebView)
+    var chatWebView: WKWebView { webView }
     private let textView = SendTextView()
 
     // 文件拖拽
@@ -127,7 +132,7 @@ class ChatViewController: NSViewController {
         if sessionManager.conversations.isEmpty {
             sessionManager.conversations = [Conversation(title: "💬 新对话 1")]
         }
-        loadChatHTML()
+        webView.navigationDelegate = self
         // 注册 JS 消息处理
         webView.configuration.userContentController.add(self, name: "fileOpen")
         updateUsageDisplay()
@@ -135,8 +140,12 @@ class ChatViewController: NSViewController {
         conversationTableView.reloadData()
         let lastIndex = min(sessionManager.conversations.count - 1, 0)
         conversationTableView.selectRowIndexes(IndexSet(integer: lastIndex), byExtendingSelection: false)
+        // 只加载一次 HTML:有历史就走 switchToConversation(内部会 loadChatHTML(then:) 注入消息),
+        // 否则空会话直接加载。避免连续两次 loadHTMLString 导致恢复竞态 / 消息丢失。
         if sessionManager.conversations.count > 1 || !sessionManager.conversations[0].messages.isEmpty {
             switchToConversation(lastIndex)
+        } else {
+            loadChatHTML()
         }
 
         avatarManager.setup()
@@ -801,6 +810,12 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
 
     // MARK: - Chat HTML
     private func loadChatHTML() { webView.loadHTMLString(chatHTML(), baseURL: nil) }
+
+    /// 加载聊天 HTML 并在加载完成后执行 restore(注入历史消息 + 定位到底部)
+    private func loadChatHTML(then restore: (() -> Void)?) {
+        pendingRestore = restore
+        webView.loadHTMLString(chatHTML(), baseURL: nil)
+    }
     private func chatHTML() -> String { return """
         <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark">
         <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,"SF Pro","PingFang SC",sans-serif;font-size:14px;line-height:1.6;padding:16px;color:#1d1d1f;overflow-y:auto;-webkit-user-select:text;user-select:text}@media(prefers-color-scheme:dark){body{color:#f5f5f7}}.message{margin-bottom:16px;padding:10px 14px;border-radius:12px;max-width:85%;word-wrap:break-word;white-space:pre-wrap}.user{background:#007aff;color:white;margin-left:auto;border-bottom-right-radius:4px}.assistant{background:#e9e9eb;margin-right:auto;border-bottom-left-radius:4px}@media(prefers-color-scheme:dark){.assistant{background:#2c2c2e}}.message code{font-family:"SF Mono",Menlo,monospace;font-size:13px}.typing{opacity:.5;animation:blink 1s ease-in-out infinite}@keyframes blink{50%{opacity:.2}}.time{font-size:11px;opacity:.5;margin-top:4px}#messages{padding-bottom:8px}.welcome{text-align:center;margin-top:40%;opacity:.4}.welcome h2{font-size:24px;margin-bottom:8px}.welcome p{font-size:14px}.file-card{display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(0,122,255,0.08);border-radius:10px;border:1px solid rgba(0,122,255,0.15);margin-top:6px;cursor:pointer;transition:background 0.15s}.file-card:hover{background:rgba(0,122,255,0.14)}.file-icon{font-size:28px;flex-shrink:0}.file-info{flex:1;min-width:0}.file-name{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-size{font-size:11px;opacity:.6;margin-top:1px}.file-badge{font-size:11px;padding:2px 8px;border-radius:4px;background:rgba(0,122,255,0.12);color:#007aff;font-weight:500}.image-preview{max-width:min(100%,400px);max-height:320px;border-radius:10px;margin-top:6px;cursor:pointer;transition:opacity 0.15s;display:block;object-fit:contain}.image-preview:hover{opacity:0.85}.user .file-card,.user .file-badge{background:rgba(255,255,255,0.15);border-color:rgba(255,255,255,0.2)}.user .file-badge{color:rgba(255,255,255,0.9)}@media(prefers-color-scheme:dark){.file-card{background:rgba(0,122,255,0.12);border-color:rgba(0,122,255,0.2)}.file-card:hover{background:rgba(0,122,255,0.2)}}.img-grid{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.img-grid .image-preview{max-width:200px;max-height:200px;margin-top:0}.code-preview{margin-top:6px;border-radius:8px;overflow:hidden;border:1px solid rgba(128,128,128,0.2)}.code-preview pre{margin:0;padding:10px 14px;font-family:"SF Mono",Menlo,monospace;font-size:12px;line-height:1.5;overflow-x:auto;background:rgba(128,128,128,0.06);white-space:pre-wrap;word-break:break-word}.code-preview .code-header{display:flex;justify-content:space-between;align-items:center;padding:4px 10px;font-size:11px;background:rgba(128,128,128,0.08);color:rgba(128,128,128,0.7)}.code-preview .code-header .lang{font-weight:600;text-transform:uppercase}</style></head><body>
@@ -808,8 +823,11 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
         <script>
         function isAtBottom(){try{var b=document.body;return (b.scrollHeight-b.scrollTop-b.clientHeight)<=48}catch(e){return true}}
         function doScroll(smooth){try{var b=document.body;b.scrollTo({top:b.scrollHeight,behavior:smooth?'smooth':'auto'})}catch(e){}}
-        function scrollToEnd(force){try{if(force){doScroll(true);return}if(isAtBottom())doScroll(true)}catch(e){}}
+        var restoring=false;
+        function scrollToEnd(force){try{if(restoring)return;if(force){doScroll(true);return}if(isAtBottom())doScroll(true)}catch(e){}}
         function jumpToEnd(){try{var b=document.body;b.scrollTop=b.scrollHeight}catch(e){}}
+        function beginRestore(){restoring=true}
+        function endRestore(){restoring=false;jumpToEnd();requestAnimationFrame(function(){jumpToEnd()})}
         function addMessage(r,c){try{removeWelcome();var m=document.getElementById('messages');if(!m)return null;var d=document.createElement('div');d.className='message '+r;d.innerHTML='<p>'+esc(c)+'</p>';var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);scrollToEnd(true);return d}catch(e){console.error('addMessage:',e);return null}}
         function apd(t){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var l=document.getElementById('s');if(!l){var d=document.createElement('div');d.className='message assistant';d.id='s';d.innerHTML='<p></p>';d.appendChild(document.createElement('div')).className='time';m.appendChild(d);l=d}var p=l.querySelector('p');if(p)p.textContent+=t;scrollToEnd(false)}catch(e){console.error('apd:',e)}}
         function fin(){try{var e=document.getElementById('s');if(e){var t=e.querySelector('.time');if(t)t.textContent=new Date().toLocaleTimeString();e.id=''}}catch(ex){console.error('fin:',ex)}rt()}
@@ -1159,11 +1177,9 @@ extension ChatViewController {
         updateUsageDisplay()
         // Re-render messages
         let conv = sessionManager.conversations[index]
-        let html = chatHTML()
-        webView.loadHTMLString(html, baseURL: nil)
-        // Re-add all messages to webview after load
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self = self else { return }
+        // 把恢复逻辑挂到 didFinish 后执行(loadHTMLString 是异步的,固定延时会有竞态)
+        loadChatHTML {
+            self.js("beginRestore()")
             for (msgIndex, msg) in conv.messages.enumerated() {
                 let role = msg["role"] ?? "user"
                 let content = msg["content"] ?? ""
@@ -1198,7 +1214,9 @@ AppLogger.shared.log("[Warning] Message \(msgIndex) has empty content, skipping"
                 }
             }
             // 历史恢复完成后瞬时滚到底部(避免逐条 smooth 滚动互相取消导致停在顶部)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self.js("endRestore()")
+            // 图片/布局可能稍后完成导致高度变化,再补一次瞬时定位
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 self?.js("jumpToEnd()")
             }
         }
