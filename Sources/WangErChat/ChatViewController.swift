@@ -808,7 +808,9 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
         <script>
         function isAtBottom(){try{var b=document.body;return (b.scrollHeight-b.scrollTop-b.clientHeight)<=48}catch(e){return true}}
         function doScroll(smooth){try{var b=document.body;b.scrollTo({top:b.scrollHeight,behavior:smooth?'smooth':'auto'})}catch(e){}}
-        function scrollToEnd(force){try{if(force){doScroll(true);return}if(isAtBottom())doScroll(true)}catch(e){}}function addMessage(r,c){try{removeWelcome();var m=document.getElementById('messages');if(!m)return null;var d=document.createElement('div');d.className='message '+r;d.innerHTML='<p>'+esc(c)+'</p>';var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);scrollToEnd(true);return d}catch(e){console.error('addMessage:',e);return null}}
+        function scrollToEnd(force){try{if(force){doScroll(true);return}if(isAtBottom())doScroll(true)}catch(e){}}
+        function jumpToEnd(){try{var b=document.body;b.scrollTop=b.scrollHeight}catch(e){}}
+        function addMessage(r,c){try{removeWelcome();var m=document.getElementById('messages');if(!m)return null;var d=document.createElement('div');d.className='message '+r;d.innerHTML='<p>'+esc(c)+'</p>';var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);scrollToEnd(true);return d}catch(e){console.error('addMessage:',e);return null}}
         function apd(t){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var l=document.getElementById('s');if(!l){var d=document.createElement('div');d.className='message assistant';d.id='s';d.innerHTML='<p></p>';d.appendChild(document.createElement('div')).className='time';m.appendChild(d);l=d}var p=l.querySelector('p');if(p)p.textContent+=t;scrollToEnd(false)}catch(e){console.error('apd:',e)}}
         function fin(){try{var e=document.getElementById('s');if(e){var t=e.querySelector('.time');if(t)t.textContent=new Date().toLocaleTimeString();e.id=''}}catch(ex){console.error('fin:',ex)}rt()}
         function esc(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
@@ -1194,6 +1196,10 @@ AppLogger.shared.log("[Warning] Message \(msgIndex) has empty content, skipping"
                 } else {
                     self.js("addMessage('\(role.escapedForJS)','\(content.escapedForJS)')")
                 }
+            }
+            // 历史恢复完成后瞬时滚到底部(避免逐条 smooth 滚动互相取消导致停在顶部)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.js("jumpToEnd()")
             }
         }
     }
