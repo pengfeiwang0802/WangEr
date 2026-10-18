@@ -18,3 +18,4 @@ xcuserdata/
 
 # Local runtime data
 conversations.json
+conversations.json.bak.*

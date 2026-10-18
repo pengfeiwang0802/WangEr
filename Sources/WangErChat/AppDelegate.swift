@@ -8,7 +8,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
             return "v\(version)"
         }
-        return "v0.4.10"
+        return "v0.4.20"
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

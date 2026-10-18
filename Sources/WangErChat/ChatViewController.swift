@@ -44,6 +44,12 @@ class ChatViewController: NSViewController {
     private let dropIndicator = NSView()
     private let dropLabel = NSTextField()
     private let textScrollView = NSScrollView()
+    private let inputResizeHandle = InputResizeHandle()
+    /// 输入框高度约束（可通过拖动顶部分隔条调整）
+    private var inputHeightConstraint: NSLayoutConstraint?
+    private static let defaultInputHeight: CGFloat = 72
+    private static let minInputHeight: CGFloat = 72
+    private static let inputHeightDefaultsKey = "inputAreaHeight"
     private let sendButton = NSButton()
     private let stopButton = NSButton()
     private let attachButton = NSButton()
@@ -100,7 +106,13 @@ class ChatViewController: NSViewController {
     private var isStepIndicatorVisible = false
 
     // 文件缓存清理:最大 100MB,最多 100 个文件
-    private var currentModel = UserDefaults.standard.string(forKey: "selectedModel") ?? "DeepSeek V4 Flash"
+    /// 当前会话正在使用的模型(apiModelId 格式,如 "openai/gpt-5.5")
+    /// 这是唯一权威来源:下拉菜单、底栏、请求头都从它读取
+    private var currentModelId: String = Models.normalize(
+        UserDefaults.standard.string(forKey: "selectedModelId") ?? "deepseek/deepseek-flash"
+    )
+    /// 当前模型的显示名(用于 UI)
+    private var currentModel: String { Models.prettyName(for: currentModelId) }
     private let balanceService = BalanceService()
     private var dsBalance: String = "--"
     private var moonshotBalance: String = "--"
@@ -135,6 +147,8 @@ class ChatViewController: NSViewController {
         webView.navigationDelegate = self
         // 注册 JS 消息处理
         webView.configuration.userContentController.add(self, name: "fileOpen")
+        // 同步模型 UI(下拉菜单 + 底栏):此时 availableModels 已加载
+        refreshModelUI()
         updateUsageDisplay()
         fetchBalance()
         conversationTableView.reloadData()
@@ -492,6 +506,14 @@ class ChatViewController: NSViewController {
         textView.isRichText = false
         textView.isEditable = true
         textView.drawsBackground = false
+        // 让文本宽度跟随滚动视图，纵向可增长，避免调整高度后换行/留白异常
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.delegate = self
         textView.onCommandEnter = { [weak self] in self?.send() }
         textView.onPasteImage = { [weak self] data, filename, mimeType in
@@ -504,6 +526,16 @@ class ChatViewController: NSViewController {
         }
         textScrollView.documentView = textView
         chatContainer.addSubview(textScrollView)
+
+        // 输入框顶部的拖拽条（上下拖动改高度，双击复位）
+        inputResizeHandle.translatesAutoresizingMaskIntoConstraints = false
+        inputResizeHandle.onDrag = { [weak self] delta in
+            self?.adjustInputHeight(by: delta)
+        }
+        inputResizeHandle.onReset = { [weak self] in
+            self?.setInputHeight(ChatViewController.defaultInputHeight)
+        }
+        chatContainer.addSubview(inputResizeHandle)
 
         sendButton.translatesAutoresizingMaskIntoConstraints = false
         sendButton.title = "发送"; sendButton.bezelStyle = .rounded
@@ -526,14 +558,19 @@ class ChatViewController: NSViewController {
             webView.topAnchor.constraint(equalTo: toolbarView.bottomAnchor, constant: 4),
             webView.leadingAnchor.constraint(equalTo: chatContainer.leadingAnchor, constant: 8),
             webView.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -8),
-            webView.bottomAnchor.constraint(equalTo: textScrollView.topAnchor, constant: -8),
+            webView.bottomAnchor.constraint(equalTo: inputResizeHandle.topAnchor, constant: -4),
+            // 输入框拖得再高，也保证聊天区还有可用高度
+            webView.heightAnchor.constraint(greaterThanOrEqualToConstant: 100),
 
-            // Input area at bottom, full width. Top edge aligns with the attach button's top edge
-            // so the whole input row and button column look vertically aligned.
+            // Input area at bottom, full width. Height is user-adjustable via the handle above it.
             textScrollView.leadingAnchor.constraint(equalTo: chatContainer.leadingAnchor, constant: 8),
             textScrollView.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -76),
             textScrollView.bottomAnchor.constraint(equalTo: statusBar.topAnchor, constant: -8),
-            textScrollView.topAnchor.constraint(equalTo: attachButton.topAnchor),
+
+            inputResizeHandle.leadingAnchor.constraint(equalTo: textScrollView.leadingAnchor),
+            inputResizeHandle.trailingAnchor.constraint(equalTo: textScrollView.trailingAnchor),
+            inputResizeHandle.bottomAnchor.constraint(equalTo: textScrollView.topAnchor),
+            inputResizeHandle.heightAnchor.constraint(equalToConstant: 8),
 
             // Send button to the right of the input, bottom-aligned with the input bottom
             sendButton.leadingAnchor.constraint(equalTo: textScrollView.trailingAnchor, constant: 8),
@@ -549,12 +586,38 @@ class ChatViewController: NSViewController {
             stopButton.widthAnchor.constraint(equalToConstant: 60),
             stopButton.heightAnchor.constraint(equalToConstant: 32),
 
-            // Attach button above the send button, same size; its top edge = input top edge
+            // Attach button: 锚定在输入框【顶边】，随输入框高度变化一起上下移动
             attachButton.trailingAnchor.constraint(equalTo: chatContainer.trailingAnchor, constant: -8),
-            attachButton.bottomAnchor.constraint(equalTo: sendButton.topAnchor, constant: -8),
+            attachButton.topAnchor.constraint(equalTo: textScrollView.topAnchor),
             attachButton.widthAnchor.constraint(equalToConstant: 60),
             attachButton.heightAnchor.constraint(equalToConstant: 32),
         ])
+
+        // 输入框高度：可由拖拽条调整，并记住上次的高度
+        let saved = UserDefaults.standard.double(forKey: ChatViewController.inputHeightDefaultsKey)
+        let initialHeight = saved > 0 ? min(CGFloat(saved), 400) : ChatViewController.defaultInputHeight
+        let heightConstraint = textScrollView.heightAnchor.constraint(equalToConstant: initialHeight)
+        heightConstraint.priority = .defaultHigh
+        heightConstraint.isActive = true
+        inputHeightConstraint = heightConstraint
+    }
+
+    // MARK: - 输入框高度调整
+    private func adjustInputHeight(by delta: CGFloat) {
+        let current = inputHeightConstraint?.constant ?? ChatViewController.defaultInputHeight
+        setInputHeight(current + delta)
+    }
+
+    private func setInputHeight(_ height: CGFloat) {
+        let maxHeight = max(ChatViewController.minInputHeight,
+                            (chatContainer.bounds.height * 0.65).rounded())
+        let clamped = min(max(height, ChatViewController.minInputHeight), maxHeight)
+        guard clamped != inputHeightConstraint?.constant else { return }
+        inputHeightConstraint?.constant = clamped
+        UserDefaults.standard.set(Double(clamped), forKey: ChatViewController.inputHeightDefaultsKey)
+        // 拖动过程中立即重排，保证聊天区底边与输入框顶边同步上下移动（不等到 mouseUp 才刷新）
+        chatContainer.needsLayout = true
+        chatContainer.layoutSubtreeIfNeeded()
     }
 
     // MARK: - 底部状态栏
@@ -613,6 +676,27 @@ class ChatViewController: NSViewController {
         tokenLabel.stringValue = "⚡ \(formatNumber(sessionManager.totalPromptTokens)) + \(formatNumber(sessionManager.totalCompletionTokens)) = \(formatNumber(total)) tok"
     }
 
+    /// 把当前模型同步到所有 UI 位置(下拉菜单按钮 + 底栏标签)
+    private func refreshModelUI() {
+        modelButton.title = "🧠 \(currentModel) ▾"
+        modelLabel.stringValue = "🤖 \(currentModel)"
+        // 同步菜单勾选状态
+        for item in modelMenu.items {
+            item.state = (item.representedObject as? String) == currentModelId ? .on : .off
+        }
+    }
+
+    /// 切换当前模型(唯一入口):更新状态 + UI + 持久化 + 写回当前会话
+    private func setCurrentModel(_ apiModelId: String, persistToConversation: Bool = true) {
+        currentModelId = apiModelId
+        UserDefaults.standard.set(apiModelId, forKey: "selectedModelId")
+        refreshModelUI()
+        if persistToConversation {
+            sessionManager.setModel(apiModelId)
+        }
+        AppLogger.shared.log("[Model] 当前模型切换为 \(apiModelId) (\(currentModel))")
+    }
+
 
 
 
@@ -651,17 +735,16 @@ class ChatViewController: NSViewController {
 
         guard FileManager.default.fileExists(atPath: path) else {
 AppLogger.shared.log("[loadAvailableModels] openclaw.json 不存在,使用默认模型")
-            availableModels = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
+            availableModels = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-flash")]
             return
         }
-
         do {
             let data = try Data(contentsOf: url)
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let models = json["models"] as? [String: Any],
                   let providers = models["providers"] as? [String: Any] else {
 AppLogger.shared.log("[loadAvailableModels] 解析 openclaw.json 结构失败")
-                availableModels = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
+                availableModels = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-flash")]
                 return
             }
 
@@ -680,17 +763,34 @@ AppLogger.shared.log("[loadAvailableModels] 解析 openclaw.json 结构失败")
 
             if result.isEmpty {
                 // 兜底
-                result = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
+                result = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-flash")]
             }
 
+            // 去重:同一 apiModelId 只保留一个(不同别名可能重复注册)
+            var seen = Set<String>()
+            result = result.filter { seen.insert($0.apiModelId).inserted }
+
             availableModels = result
-            // 如果当前选中模型不在可用列表中,切到第一个
-            if !result.contains(where: { $0.displayName == currentModel }) {
-                currentModel = result.first?.displayName ?? "DeepSeek V4 Flash"
+            // 如果当前选中模型不在可用列表中,优先回退到 agents.defaults.model.primary,
+            // 其次才是列表第一个(避免因为 provider 遍历顺序意外切到 Kimi)
+            if !result.contains(where: { $0.apiModelId == currentModelId }) {
+                var defaultPrimary: String?
+                if let agents = json["agents"] as? [String: Any],
+                   let defaults = agents["defaults"] as? [String: Any],
+                   let model = defaults["model"] as? [String: Any],
+                   let primary = model["primary"] as? String {
+                    defaultPrimary = primary
+                }
+                if let primary = defaultPrimary, result.contains(where: { $0.apiModelId == primary }) {
+                    currentModelId = primary
+                } else {
+                    currentModelId = result.first?.apiModelId ?? "deepseek/deepseek-flash"
+                }
+                UserDefaults.standard.set(currentModelId, forKey: "selectedModelId")
             }
         } catch {
 AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error)")
-            availableModels = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-v4-flash")]
+            availableModels = [Models.ModelOption(displayName: "DeepSeek V4 Flash", apiModelId: "deepseek/deepseek-flash")]
             DispatchQueue.main.async { [weak self] in
                 self?.statusLabel.stringValue = "⚠️ 模型配置读取失败"
             }
@@ -701,18 +801,23 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
         modelMenu.removeAllItems()
         for opt in availableModels {
             let item = NSMenuItem(title: opt.displayName, action: #selector(selectModel(_:)), keyEquivalent: "")
-            item.target = self; item.state = opt.displayName == currentModel ? .on : .off; modelMenu.addItem(item)
+            item.target = self
+            // 用 representedObject 存 apiModelId:显示名可能重复/改名,id 才是稳定标识
+            item.representedObject = opt.apiModelId
+            item.state = opt.apiModelId == currentModelId ? .on : .off
+            modelMenu.addItem(item)
         }
     }
     @objc func showModelMenu() {
+        // 每次弹出前重建,保证勾选状态与当前模型一致
+        setupModelMenu()
         let buttonBounds = modelButton.bounds
         let menuOrigin = NSPoint(x: buttonBounds.minX, y: buttonBounds.minY)
         modelMenu.popUp(positioning: nil, at: menuOrigin, in: modelButton)
     }
     @objc func selectModel(_ sender: NSMenuItem) {
-        modelMenu.items.forEach { $0.state = .off }; sender.state = .on
-        currentModel = sender.title; modelButton.title = "🧠 \(currentModel) ▾"; modelLabel.stringValue = "🤖 \(currentModel)"
-        UserDefaults.standard.set(currentModel, forKey: "selectedModel")
+        guard let apiModelId = sender.representedObject as? String else { return }
+        setCurrentModel(apiModelId)
     }
     // MARK: - 文件拖拽
     private func setupFileDragDrop() {
@@ -828,10 +933,24 @@ AppLogger.shared.log("[loadAvailableModels] 读取 openclaw.json 失败: \(error
         function isAtBottom(){try{var b=scroller();return (b.scrollHeight-b.scrollTop-b.clientHeight)<=48}catch(e){return true}}
         function doScroll(smooth){try{var b=scroller();b.scrollTo({top:b.scrollHeight,behavior:smooth?'smooth':'auto'})}catch(e){}}
         var restoring=false;
-        function scrollToEnd(force){try{if(restoring)return;if(force){doScroll(true);return}if(isAtBottom())doScroll(true)}catch(e){}}
-        function jumpToEnd(){try{var b=scroller();b.scrollTop=b.scrollHeight}catch(e){}}
+        // 「用户是否主动离开底部」意图标记：只在用户向上滚动时置 true，回到底部时置 false。
+        // 注意：视口变矮（拖动输入框）会让 isAtBottom() 变成 false，但那不是用户意图，
+        // 所以不能用 isAtBottom() 直接当跟随条件，否则一拖输入框就停止跟随/内容被挤出可视区。
+        var scrolledAway=false;
+        var lastScrollTop=0;
+        function onScrollEvent(){try{var b=scroller();
+          if(b.scrollTop < lastScrollTop - 2){ if(!isAtBottom()) scrolledAway=true; }
+          else if(isAtBottom()){ scrolledAway=false; }
+          lastScrollTop=b.scrollTop;
+        }catch(e){}}
+        window.addEventListener('scroll',onScrollEvent,true);
+        function scrollToEnd(force){try{if(restoring)return;if(force){scrolledAway=false;doScroll(true);return}if(!scrolledAway)doScroll(true)}catch(e){}}
+        function jumpToEnd(){try{var b=scroller();b.scrollTop=b.scrollHeight;lastScrollTop=b.scrollTop}catch(e){}}
+        // 聊天区高度变化（拖动输入框、窗口缩放）时，如果用户没有主动离开底部，就重新贴底，
+        // 保证「输入框变高后，输出框底部上移但最后一条消息依然可见」。
+        window.addEventListener('resize',function(){try{if(restoring)return;if(scrolledAway)return;jumpToEnd();requestAnimationFrame(jumpToEnd)}catch(e){}});
         function beginRestore(){restoring=true}
-        function endRestore(){restoring=false;jumpToEnd();requestAnimationFrame(function(){jumpToEnd()});setTimeout(function(){jumpToEnd()},50);setTimeout(function(){jumpToEnd()},250)}
+        function endRestore(){restoring=false;scrolledAway=false;jumpToEnd();requestAnimationFrame(function(){jumpToEnd()});setTimeout(function(){jumpToEnd()},50);setTimeout(function(){jumpToEnd()},250)}
         function addMessage(r,c){try{removeWelcome();var m=document.getElementById('messages');if(!m)return null;var d=document.createElement('div');d.className='message '+r;d.innerHTML='<p>'+esc(c)+'</p>';var t=document.createElement('div');t.className='time';t.textContent=new Date().toLocaleTimeString();d.appendChild(t);m.appendChild(d);scrollToEnd(true);return d}catch(e){console.error('addMessage:',e);return null}}
         function apd(t){try{removeWelcome();var m=document.getElementById('messages');if(!m)return;var l=document.getElementById('s');if(!l){var d=document.createElement('div');d.className='message assistant';d.id='s';d.innerHTML='<p></p>';d.appendChild(document.createElement('div')).className='time';m.appendChild(d);l=d}var p=l.querySelector('p');if(p)p.textContent+=t;scrollToEnd(false)}catch(e){console.error('apd:',e)}}
         function fin(){try{var e=document.getElementById('s');if(e){var t=e.querySelector('.time');if(t)t.textContent=new Date().toLocaleTimeString();e.id=''}}catch(ex){console.error('fin:',ex)}rt()}
@@ -929,7 +1048,7 @@ extension ChatViewController: NSTextViewDelegate {
         js("at()")
         resetSafetyTimer()
 
-        let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
+        let mappedModel = currentModelId
 AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedModel)")
 
         let session = StreamSession()
@@ -956,7 +1075,7 @@ AppLogger.shared.log("[DEBUG] currentModel=\(currentModel) mappedModel=\(mappedM
             ]
         }
 
-        let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
+        let mappedModel = currentModelId
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
 
         startStreamingRequest(
@@ -1117,7 +1236,7 @@ extension ChatViewController {
             ]
         ]
 
-        let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
+        let mappedModel = currentModelId
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
 
         startStreamingRequest(
@@ -1155,7 +1274,7 @@ extension ChatViewController {
             ]
         ]
 
-        let mappedModel = availableModels.first(where: { $0.displayName == currentModel })?.apiModelId ?? "deepseek/deepseek-v4-flash"
+        let mappedModel = currentModelId
         let temperature: Double = mappedModel.contains("kimi") ? 0.6 : 0.7
 
         startStreamingRequest(
@@ -1178,6 +1297,17 @@ extension ChatViewController {
             }
             return
         }
+        // 恢复该会话自己的模型(旧会话无记录则沿用当前全局选择)
+        // 旧会话可能存着已下线的模型 id:先归一,再校验是否在可用列表里,
+        // 不在则沿用全局选择,避免把 Gateway 打 400。
+        if let convModel = sessionManager.modelForCurrentConversation() {
+            let normalized = Models.normalize(convModel)
+            if availableModels.contains(where: { $0.apiModelId == normalized }) {
+                currentModelId = normalized
+                UserDefaults.standard.set(normalized, forKey: "selectedModelId")
+            }
+        }
+        refreshModelUI()
         updateUsageDisplay()
         // Re-render messages
         let conv = sessionManager.conversations[index]
@@ -1319,5 +1449,3 @@ extension ChatViewController: ResponseEventHandlerDelegate {
         }
     }
 }
-
-

@@ -96,9 +96,12 @@ struct BalanceService {
         var req = URLRequest(url: url)
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.timeoutInterval = 10
+        req.timeoutInterval = 30
 
-        URLSession.shared.dataTask(with: req) { data, response, error in
+        // Use ephemeral session to avoid shared cache/pool issues
+        let session = URLSession(configuration: .ephemeral)
+        session.dataTask(with: req) { data, response, error in
+            defer { session.finishTasksAndInvalidate() }
             if let error = error {
                 AppLogger.shared.log("[Balance] Kimi 查询错误: \(error)")
                 completion("错误")

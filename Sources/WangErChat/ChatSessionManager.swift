@@ -88,4 +88,17 @@ class ChatSessionManager {
         conversations[index].title = title
         save()
     }
+
+    /// 记录当前会话使用的模型(apiModelId)
+    func setModel(_ apiModelId: String) {
+        guard conversations.indices.contains(currentConversationIndex) else { return }
+        conversations[currentConversationIndex].model = apiModelId
+        save()
+    }
+
+    /// 读取当前会话使用的模型(旧数据可能为 nil)
+    func modelForCurrentConversation() -> String? {
+        guard conversations.indices.contains(currentConversationIndex) else { return nil }
+        return conversations[currentConversationIndex].model
+    }
 }
